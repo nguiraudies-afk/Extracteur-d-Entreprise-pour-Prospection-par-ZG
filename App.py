@@ -249,4 +249,8 @@ if bouton_lancer:
 
                             st.success(f"☁️ Fichier également sauvegardé dans Google Drive : « {dossier_nom} > {nom_sheet} ».")
                         else:
-                            st.warning("⚠️ La sauvegarde Google Drive a été ignorée
+                            st.warning("⚠️ La sauvegarde Google Drive a été ignorée car aucune clé d'accès Google Cloud n'est configurée.")
+
+                    st.dataframe(df, use_container_width=True)
+                else:
+                    st.info("Aucune entreprise active trouvée pour cette recherche.")
