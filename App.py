@@ -75,12 +75,47 @@ def normaliser_texte_commune(texte: Optional[str]) -> str:
 def charger_calendrier_cuivre(nom_fichier: str = "calendrier_cuivre_orange.json") -> dict[str, Any]:
     dossier_script = os.path.dirname(os.path.abspath(__file__))
     chemin_fichier = os.path.join(dossier_script, nom_fichier)
-    if os.path.exists(chemin_fichier):
-        with open(chemin_fichier, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            if isinstance(data, dict):
-                return data
-    return {"communes": {}, "par_cp": {}, "par_commune": {}}
+    if not os.path.exists(chemin_fichier):
+        return {"communes": {}, "par_cp": {}, "par_commune": {}}
+
+    with open(chemin_fichier, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    if not isinstance(data, dict):
+        return {"communes": {}, "par_cp": {}, "par_commune": {}}
+
+    communes_brutes = data.get("communes") or {}
+    communes: dict[str, list[str]] = {}
+    par_cp: dict[str, list[str]] = {k: list(v) for k, v in (data.get("par_cp") or {}).items()}
+    par_commune: dict[str, list[str]] = {k: list(v) for k, v in (data.get("par_commune") or {}).items()}
+
+    for code_insee, infos in communes_brutes.items():
+        if not isinstance(infos, (list, tuple)) or len(infos) < 3:
+            continue
+        insee_clean = str(code_insee).strip()
+        nom_commune = str(infos[0] or "").strip()
+        cp = str(infos[1] or "").strip()
+        date_fin = str(infos[2] or "").strip()
+        lot = str(infos[3] or "").strip() if len(infos) > 3 else ""
+
+        communes[insee_clean] = [nom_commune, cp, date_fin, lot]
+
+        if cp:
+            par_cp.setdefault(cp, [])
+            if insee_clean not in par_cp[cp]:
+                par_cp[cp].append(insee_clean)
+
+        cle_commune = normaliser_texte_commune(nom_commune)
+        if cle_commune:
+            par_commune.setdefault(cle_commune, [])
+            if insee_clean not in par_commune[cle_commune]:
+                par_commune[cle_commune].append(insee_clean)
+
+    return {
+        "communes": communes,
+        "par_cp": par_cp,
+        "par_commune": par_commune,
+    }
 
 
 def trouver_info_cuivre(
@@ -94,11 +129,13 @@ def trouver_info_cuivre(
     par_cp = calendrier.get("par_cp") or {}
     par_commune = calendrier.get("par_commune") or {}
 
+    # 1. Recherche exacte par code INSEE de la commune
     insee_clean = str(code_insee or "").strip()
     if insee_clean in communes:
         _, _, date_fin, lot = communes[insee_clean]
         return date_fin or "Non renseignée", lot or ""
 
+    # 2. Recherche par nom de commune normalisé
     cle_commune = normaliser_texte_commune(nom_commune)
     if cle_commune in par_commune and par_commune[cle_commune]:
         insee_match = par_commune[cle_commune][0]
@@ -106,6 +143,7 @@ def trouver_info_cuivre(
             _, _, date_fin, lot = communes[insee_match]
             return date_fin or "Non renseignée", lot or ""
 
+    # 3. Repli par code postal (si plusieurs communes partagent le CP)
     cp_clean = str(code_postal or "").strip()
     if cp_clean in par_cp and par_cp[cp_clean]:
         dates = sorted({communes[i][2] for i in par_cp[cp_clean] if i in communes and communes[i][2]})
@@ -122,10 +160,10 @@ def normaliser_code_ape(code_brut: Optional[str]) -> str:
     return code
 
 
-def nettoyer_nom_fichier(nom_brut: str, code_postal: str) -> str:
+def nettoyer_nom_fichier(nom_brut: str, identifiant_cible: str) -> str:
     nom = (nom_brut or "").strip()
     if not nom:
-        return f"entreprises_{code_postal}"
+        return f"entreprises_{identifiant_cible}"
     if nom.lower().endswith(".xlsx"):
         nom = nom[:-5]
     return re.sub(r'[\\/*?:"<>|]', "_", nom)
@@ -222,18 +260,31 @@ def enregistrer_dans_drive(df: pd.DataFrame, nom_dossier: str, nom_sheet: str) -
 
 
 # --- APPELS API ---
-def obtenir_code_postal_par_ville(nom_ville: str) -> tuple[Optional[str], Optional[str]]:
+def obtenir_codes_postaux_par_ville(nom_ville: str) -> tuple[list[str], Optional[str]]:
     url_geo = "https://geo.api.gouv.fr/communes"
-    params = {"nom": nom_ville, "fields": "codesPostaux", "boost": "population", "limit": 1}
+    params = {
+        "nom": nom_ville,
+        "fields": "nom,codesPostaux,population",
+        "boost": "population",
+        "limit": 5,
+    }
     try:
         response = requests.get(url_geo, params=params, timeout=10)
         if response.status_code == 200:
             resultats = response.json()
-            if resultats and resultats[0].get("codesPostaux"):
-                return resultats[0]["codesPostaux"][0], resultats[0].get("nom")
+            if resultats:
+                ville_ref = resultats[0].get("nom")
+                codes_postaux: list[str] = []
+                for comm in resultats:
+                    if comm.get("nom") == ville_ref or not codes_postaux:
+                        for cp in comm.get("codesPostaux") or []:
+                            cp_str = str(cp).strip()
+                            if cp_str and cp_str not in codes_postaux:
+                                codes_postaux.append(cp_str)
+                return codes_postaux, ville_ref
     except requests.exceptions.RequestException as e:
         st.error(f"Erreur recherche ville : {e}")
-    return None, None
+    return [], None
 
 
 def requeter_page_entreprises(
@@ -278,7 +329,7 @@ def requeter_page_entreprises(
 
 def formater_entreprise(
     ent: dict[str, Any],
-    code_postal_cible: str,
+    codes_postaux_cibles: set[str],
     libelles_naf: dict[str, str],
     formes_juridiques: dict[str, str],
     calendrier_cuivre: dict[str, Any],
@@ -294,7 +345,8 @@ def formater_entreprise(
     if exclure_procedures and a_procedure_collective(ent):
         return None
 
-    if str(siege.get("code_postal") or "").strip() != str(code_postal_cible).strip():
+    cp_siege = str(siege.get("code_postal") or "").strip()
+    if codes_postaux_cibles and cp_siege not in codes_postaux_cibles:
         return None
 
     finances = ent.get("finances") or {}
@@ -334,7 +386,7 @@ def formater_entreprise(
         calendrier=calendrier_cuivre,
         code_insee=code_insee,
         nom_commune=siege.get("libelle_commune", ""),
-        code_postal=siege.get("code_postal"),
+        code_postal=cp_siege,
     )
 
     return {
@@ -344,7 +396,7 @@ def formater_entreprise(
         "Code APE": code_ape,
         "Activité": libelle_activite,
         "Adresse": siege.get("adresse"),
-        "Code Postal": siege.get("code_postal"),
+        "Code Postal": cp_siege,
         "Ville": siege.get("libelle_commune", ""),
         "Fin Réseau Cuivre": date_fin_cuivre,
         "Lot Cuivre": lot_cuivre,
@@ -384,14 +436,17 @@ formes_juridiques = charger_dictionnaire_json("formes_juridiques.json", FORMES_J
 calendrier_cuivre = charger_calendrier_cuivre("calendrier_cuivre_orange.json")
 
 st.title("⚡ Extracteur de Prospection Automatique")
-st.markdown("Saisissez une ville ou un code postal pour extraire les entreprises actives triées par effectif.")
+st.markdown(
+    "Saisissez une ville ou un code postal pour extraire les entreprises actives, "
+    "avec la date de fermeture du réseau cuivre associée."
+)
 
 if not libelles_naf:
-    st.warning("⚠️ Fichier `codes_naf_rev2.json` introuvable à côté de `App.py`.")
+    st.warning("⚠️ Fichier `codes_naf_rev2.json` introuvable à côté du script.")
 if len(formes_juridiques) <= len(FORMES_JURIDIQUES_DE_BASE):
     st.info("ℹ️ Fichier `formes_juridiques.json` non détecté : un dictionnaire de base est utilisé.")
 if not calendrier_cuivre.get("communes"):
-    st.warning("⚠️ Fichier `calendrier_cuivre_orange.json` introuvable ou vide à côté de `App.py`.")
+    st.warning("⚠️ Fichier `calendrier_cuivre_orange.json` introuvable ou vide à côté du script.")
 
 with st.form("form_extraction"):
     col1, col2 = st.columns(2)
@@ -426,64 +481,72 @@ if bouton_lancer:
     else:
         with st.spinner("🔍 Analyse de la localisation..."):
             if saisie.isdigit():
-                code_postal_final: Optional[str] = saisie
+                codes_postaux_cibles: list[str] = [saisie]
                 ville_prioritaire: Optional[str] = None
+                identifiant_cible = saisie
             else:
-                code_postal_final, ville_prioritaire = obtenir_code_postal_par_ville(saisie)
+                codes_postaux_cibles, ville_prioritaire = obtenir_codes_postaux_par_ville(saisie)
+                identifiant_cible = ville_prioritaire or saisie
 
-        if not code_postal_final:
+        if not codes_postaux_cibles:
             st.error(f"❌ Impossible de trouver un code postal pour '{saisie}'.")
         else:
-            nom_base_fichier = nettoyer_nom_fichier(nom_fichier_perso, code_postal_final)
+            nom_base_fichier = nettoyer_nom_fichier(nom_fichier_perso, identifiant_cible)
             cible_texte = f" ({ville_prioritaire})" if ville_prioritaire else ""
-            st.info(f"📍 Cible : Code Postal {code_postal_final}{cible_texte} | 📄 Fichier : `{nom_base_fichier}.xlsx`")
+            cp_resume = ", ".join(codes_postaux_cibles)
+            st.info(f"📍 Cible : Code(s) Postal(aux) {cp_resume}{cible_texte} | 📄 Fichier : `{nom_base_fichier}.xlsx`")
 
             with st.spinner("⏳ Extraction en cours depuis l'API nationale des entreprises..."):
-                page = 1
                 per_page = 25
                 resultats_finaux: list[dict[str, Any]] = []
+                set_cp_cibles = set(codes_postaux_cibles)
                 placeholder_progression = st.empty()
 
-                while True:
-                    data, ok = requeter_page_entreprises(
-                        code_postal=code_postal_final,
-                        page=page,
-                        per_page=per_page,
-                        placeholder_progression=placeholder_progression,
-                    )
-                    if not ok or not data:
-                        break
-
-                    entreprises = data.get("results") or []
-                    total_pages = int(data.get("total_pages") or 1)
-
-                    if not entreprises:
-                        break
-
-                    for ent in entreprises:
-                        ligne = formater_entreprise(
-                            ent=ent,
-                            code_postal_cible=code_postal_final,
-                            libelles_naf=libelles_naf,
-                            formes_juridiques=formes_juridiques,
-                            calendrier_cuivre=calendrier_cuivre,
-                            exclure_procedures=exclure_procedures,
+                for cp_courant in codes_postaux_cibles:
+                    page = 1
+                    while True:
+                        data, ok = requeter_page_entreprises(
+                            code_postal=cp_courant,
+                            page=page,
+                            per_page=per_page,
+                            placeholder_progression=placeholder_progression,
                         )
-                        if ligne:
-                            resultats_finaux.append(ligne)
+                        if not ok or not data:
+                            break
 
-                    placeholder_progression.text(
-                        f"Extraction en cours... Page {page}/{total_pages} ({len(resultats_finaux)} entreprises trouvées)"
-                    )
+                        entreprises = data.get("results") or []
+                        total_pages = int(data.get("total_pages") or 1)
 
-                    if page >= total_pages:
-                        break
-                    page += 1
-                    time.sleep(0.35)
+                        if not entreprises:
+                            break
+
+                        for ent in entreprises:
+                            ligne = formater_entreprise(
+                                ent=ent,
+                                codes_postaux_cibles=set_cp_cibles,
+                                libelles_naf=libelles_naf,
+                                formes_juridiques=formes_juridiques,
+                                calendrier_cuivre=calendrier_cuivre,
+                                exclure_procedures=exclure_procedures,
+                            )
+                            if ligne:
+                                resultats_finaux.append(ligne)
+
+                        placeholder_progression.text(
+                            f"CP {cp_courant} — Page {page}/{total_pages} ({len(resultats_finaux)} entreprises trouvées)"
+                        )
+
+                        if page >= total_pages:
+                            break
+                        page += 1
+                        time.sleep(0.35)
 
                 placeholder_progression.empty()
 
             df_final = trier_et_preparer_dataframe(resultats_finaux, ville_prioritaire)
+
+            if not df_final.empty:
+                df_final = df_final.drop_duplicates(subset=["SIREN", "Adresse", "Code Postal"]).reset_index(drop=True)
 
             if df_final.empty:
                 st.info("Aucune entreprise active trouvée pour ce critère.")
