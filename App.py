@@ -39,36 +39,20 @@ EFFECTIFS_LIBELLES: dict[str, str] = {
     "53": "10 000 salariés et plus",
 }
 
-FORMES_JURIDIQUES: dict[str, str] = {
-    "1000": "Entrepreneur individuel (EI)",
-    "5410": "SARL nationale",
-    "5485": "Autre société à responsabilité limitée",
+FORMES_JURIDIQUES_DE_BASE: dict[str, str] = {
+    "1000": "Entrepreneur individuel",
     "5498": "EURL",
     "5499": "SARL / Société à responsabilité limitée",
-    "5505": "SA à conseil d'administration",
-    "5510": "SA à directoire",
-    "5599": "SA (Société anonyme)",
-    "5699": "Autre personne morale de droit commercial",
     "5710": "SAS (Société par actions simplifiée)",
     "5720": "SASU (Société par actions simplifiée unipersonnelle)",
-    "6220": "EARL",
     "6540": "SCI (Société civile immobilière)",
-    "6599": "Autre société civile",
-    "7111": "Autorité constitutionnelle",
-    "7120": "Service central de l'État",
-    "7210": "Commune et nouvelle commune",
-    "7220": "Département",
-    "7225": "Région",
-    "7344": "Établissement public local à caractère administratif",
     "9220": "Association déclarée",
-    "9221": "Association déclarée d'insertion par l'économique",
-    "9300": "Fondation",
 }
 
 
-# --- CHARGEMENT NAF & UTILITAIRES ---
+# --- CHARGEMENT DES RÉFÉRENTIELS JSON & UTILITAIRES ---
 @st.cache_data
-def charger_libelles_naf(nom_fichier: str = "codes_naf_rev2.json") -> dict[str, str]:
+def charger_dictionnaire_json(nom_fichier: str, repli: Optional[dict[str, str]] = None) -> dict[str, str]:
     dossier_script = os.path.dirname(os.path.abspath(__file__))
     chemin_fichier = os.path.join(dossier_script, nom_fichier)
     if os.path.exists(chemin_fichier):
@@ -76,7 +60,7 @@ def charger_libelles_naf(nom_fichier: str = "codes_naf_rev2.json") -> dict[str, 
             data = json.load(f)
             if isinstance(data, dict):
                 return {str(k).strip().upper(): str(v).strip() for k, v in data.items()}
-    return {}
+    return dict(repli) if repli else {}
 
 
 def normaliser_code_ape(code_brut: Optional[str]) -> str:
@@ -93,6 +77,21 @@ def nettoyer_nom_fichier(nom_brut: str, code_postal: str) -> str:
     if nom.lower().endswith(".xlsx"):
         nom = nom[:-5]
     return re.sub(r'[\\/*?:"<>|]', "_", nom)
+
+
+def a_procedure_collective(ent: dict[str, Any]) -> bool:
+    """Détecte un indicateur de procédure collective si présent dans les champs retournés."""
+    for conteneur_nom in ("complements", "finances"):
+        conteneur = ent.get(conteneur_nom)
+        if isinstance(conteneur, dict):
+            for cle, val in conteneur.items():
+                if "procedure" in str(cle).lower() and val:
+                    return True
+                if isinstance(val, dict):
+                    for sous_cle, sous_val in val.items():
+                        if "procedure" in str(sous_cle).lower() and sous_val:
+                            return True
+    return False
 
 
 # --- GOOGLE SHEETS & DRIVE (OPTIONNEL) ---
@@ -229,8 +228,19 @@ def formater_entreprise(
     ent: dict[str, Any],
     code_postal_cible: str,
     libelles_naf: dict[str, str],
+    formes_juridiques: dict[str, str],
+    exclure_procedures: bool,
 ) -> Optional[dict[str, Any]]:
+    etat_ent = str(ent.get("etat_administratif") or "A").strip().upper()
     siege = ent.get("siege") or {}
+    etat_siege = str(siege.get("etat_administratif") or "A").strip().upper()
+
+    if etat_ent != "A" or etat_siege != "A":
+        return None
+
+    if exclure_procedures and a_procedure_collective(ent):
+        return None
+
     if str(siege.get("code_postal") or "").strip() != str(code_postal_cible).strip():
         return None
 
@@ -263,8 +273,8 @@ def formater_entreprise(
         or (f"Code APE {code_ape}" if code_ape else "Non renseignée")
     )
 
-    code_nj = str(ent.get("nature_juridique") or "").strip()
-    forme_juridique = FORMES_JURIDIQUES.get(code_nj, f"Code {code_nj}" if code_nj else "Non renseignée")
+    code_nj = str(ent.get("nature_juridique") or "").strip().upper()
+    forme_juridique = formes_juridiques.get(code_nj, f"Code {code_nj}" if code_nj else "Non renseignée")
 
     return {
         "SIREN": ent.get("siren"),
@@ -306,16 +316,16 @@ def trier_et_preparer_dataframe(lignes: list[dict[str, Any]], ville_prioritaire:
 
 
 # --- INTERFACE UTILISATEUR ---
-libelles_naf = charger_libelles_naf()
+libelles_naf = charger_dictionnaire_json("codes_naf_rev2.json")
+formes_juridiques = charger_dictionnaire_json("formes_juridiques.json", FORMES_JURIDIQUES_DE_BASE)
 
 st.title("⚡ Extracteur de Prospection Automatique")
 st.markdown("Saisissez une ville ou un code postal pour extraire les entreprises actives triées par effectif.")
 
 if not libelles_naf:
-    st.warning(
-        "⚠️ Fichier `codes_naf_rev2.json` introuvable à côté de `App.py` : "
-        "seuls les libellés renvoyés par l'API seront utilisés."
-    )
+    st.warning("⚠️ Fichier `codes_naf_rev2.json` introuvable à côté de `App.py`.")
+if len(formes_juridiques) <= len(FORMES_JURIDIQUES_DE_BASE):
+    st.info("ℹ️ Fichier `formes_juridiques.json` non détecté : un dictionnaire de base est utilisé.")
 
 with st.form("form_extraction"):
     col1, col2 = st.columns(2)
@@ -326,6 +336,11 @@ with st.form("form_extraction"):
             "Nom du fichier de sortie (sans .xlsx)",
             placeholder="Ex: Prospection_Tours_2026 (laisser vide pour auto)",
         )
+
+    exclure_procedures = st.checkbox(
+        "Exclure les entreprises avec procédure collective détectée",
+        value=True,
+    )
 
     with st.expander("⚙️ Options Google Drive (Facultatif)"):
         sauvegarder_drive = st.checkbox(
@@ -380,7 +395,13 @@ if bouton_lancer:
                         break
 
                     for ent in entreprises:
-                        ligne = formater_entreprise(ent, code_postal_final, libelles_naf)
+                        ligne = formater_entreprise(
+                            ent=ent,
+                            code_postal_cible=code_postal_final,
+                            libelles_naf=libelles_naf,
+                            formes_juridiques=formes_juridiques,
+                            exclure_procedures=exclure_procedures,
+                        )
                         if ligne:
                             resultats_finaux.append(ligne)
 
