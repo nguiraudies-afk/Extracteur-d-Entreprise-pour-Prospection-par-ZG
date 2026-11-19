@@ -37,6 +37,46 @@ EFFECTIFS_LIBELLES = {
     "53": "10 000 salariés et plus"
 }
 
+# Principaux codes de nature / forme juridique INSEE
+FORMES_JURIDIQUES = {
+    "1000": "Entrepreneur individuel (EI)",
+    "5410": "SARL nationale",
+    "5485": "Autre société à responsabilité limitée",
+    "5498": "EURL",
+    "5499": "SARL / Société à responsabilité limitée",
+    "5505": "SA à conseil d'administration",
+    "5510": "SA à directoire",
+    "5599": "SA (Société anonyme)",
+    "5699": "Autre personne morale de droit commercial",
+    "5710": "SAS (Société par actions simplifiée)",
+    "5720": "SASU (Société par actions simplifiée unipersonnelle)",
+    "6220": "EARL",
+    "6540": "SCI (Société civile immobilière)",
+    "6599": "Autre société civile",
+    "7111": "Autorité constitutionnelle",
+    "7120": "Service central de l'État",
+    "7210": "Commune et nouvelle commune",
+    "7220": "Département",
+    "7225": "Région",
+    "7344": "Établissement public local à caractère administratif",
+    "9220": "Association déclarée",
+    "9221": "Association déclarée d'insertion par l'économique",
+    "9300": "Fondation"
+}
+
+# Principaux codes NAF / APE (tu peux en ajouter autant que tu veux)
+LIBELLES_NAF = {
+    "01.13Z": "Culture de légumes, de melons, de racines et de tubercules",
+    "02.20Z": "Exploitation forestière",
+    "43.31Z": "Travaux de plâtrerie",
+    "43.99C": "Travaux de maçonnerie générale et gros œuvre de bâtiment",
+    "49.32Z": "Transports de voyageurs par taxis",
+    "56.29B": "Autres services de restauration n.c.a.",
+    "71.12B": "Ingénierie, études techniques",
+    "81.30Z": "Services d'aménagement paysager",
+    "84.11Z": "Administration publique générale",
+}
+
 # --- AUTHENTIFICATION GOOGLE SERVICES (OPTIONNELLE) ---
 def initialiser_connexion_google():
     scopes = [
@@ -189,17 +229,22 @@ if bouton_lancer:
                         score_tri = int(code_eff) if code_eff.isdigit() else -1
                         libelle_commune = siege.get("libelle_commune", "")
 
-                        # Récupération du nom, de l'enseigne et de l'activité (APE/NAF)
                         raison_sociale = ent.get("nom_raison_sociale") or ent.get("nom_complet") or ""
                         enseignes = siege.get("liste_enseignes") or []
                         enseigne_str = ", ".join(enseignes) if isinstance(enseignes, list) else str(enseignes)
                         code_ape = ent.get("activite_principale") or siege.get("activite_principale") or ""
-                        libelle_activite = ent.get("libelle_activite_principale") or siege.get("libelle_activite_principale") or ""
+                        libelle_activite = (
+                            ent.get("libelle_activite_principale")
+                            or siege.get("libelle_activite_principale")
+                            or LIBELLES_NAF.get(code_ape, "")
+                        )
+
+                        code_nj = str(ent.get("nature_juridique") or "").strip()
+                        forme_juridique = FORMES_JURIDIQUES.get(code_nj, f"Code {code_nj}" if code_nj else "Non renseignée")
 
                         resultats_finaux.append({
                             "SIREN": ent.get("siren"),
                             "Raison Sociale": raison_sociale,
-                            "Dénomination": ent.get("nom_complet"),
                             "Enseigne": enseigne_str,
                             "Code APE": code_ape,
                             "Activité": libelle_activite,
@@ -213,7 +258,8 @@ if bouton_lancer:
                             "Année Bilan": annee_bilan,
                             "Chiffre d'Affaires (€)": ca,
                             "Résultat Net (€)": resultat_net,
-                            "Statut": "Actif"
+                            "Statut": "Actif",
+                            "Forme Juridique": forme_juridique
                         })
 
                     placeholder_progression.text(f"Extraction en cours... Page {page}/{total_pages} ({len(resultats_finaux)} entreprises trouvées)")
@@ -230,10 +276,10 @@ if bouton_lancer:
                     if ville_prioritaire:
                         nom_cible_lower = ville_prioritaire.strip().lower()
                         df["Priorité Ville"] = df["Ville"].apply(lambda x: 1 if str(x).strip().lower() == nom_cible_lower else 2)
-                        df = df.sort_values(by=["Priorité Ville", "Score Tri", "Dénomination"], ascending=[True, False, True])
+                        df = df.sort_values(by=["Priorité Ville", "Score Tri", "Raison Sociale"], ascending=[True, False, True])
                         df = df.drop(columns=["Priorité Ville", "Score Tri"])
                     else:
-                        df = df.sort_values(by=["Score Tri", "Dénomination"], ascending=[False, True])
+                        df = df.sort_values(by=["Score Tri", "Raison Sociale"], ascending=[False, True])
                         df = df.drop(columns=["Score Tri"])
 
                     buffer = io.BytesIO()
@@ -256,34 +302,4 @@ if bouton_lancer:
                                 id_dossier_cible = obtenir_ou_creer_dossier(drive_service, dossier_nom)
                                 nom_sheet = nom_base_fichier
 
-                                requete_fichier = f"name = '{nom_sheet}' and '{id_dossier_cible}' in parents and mimeType = 'application/vnd.google-apps.spreadsheet' and trashed = false"
-                                resultat_fichiers = drive_service.files().list(q=requete_fichier, fields='files(id)').execute()
-                                fichiers_existants = resultat_fichiers.get('files', [])
-
-                                if fichiers_existants:
-                                    id_fichier = fichiers_existants[0]['id']
-                                    sh = gc.open_by_key(id_fichier)
-                                else:
-                                    sh = gc.create(nom_sheet)
-                                    id_fichier = sh.id
-                                    fichier = drive_service.files().get(fileId=id_fichier, fields='parents').execute()
-                                    parents_precedents = ",".join(fichier.get('parents', []))
-                                    drive_service.files().update(
-                                        fileId=id_fichier,
-                                        addParents=id_dossier_cible,
-                                        removeParents=parents_precedents,
-                                        fields='id, parents'
-                                    ).execute()
-
-                                df_drive = df.fillna("")
-                                worksheet = sh.get_worksheet(0)
-                                worksheet.clear()
-                                worksheet.update([df_drive.columns.values.tolist()] + df_drive.values.tolist())
-
-                            st.success(f"☁️ Fichier également sauvegardé dans Google Drive : « {dossier_nom} > {nom_sheet} ».")
-                        else:
-                            st.warning("⚠️ La sauvegarde Google Drive a été ignorée car aucune clé d'accès Google Cloud n'est configurée.")
-
-                    st.dataframe(df, use_container_width=True)
-                else:
-                    st.info("Aucune entreprise active trouvée pour cette recherche.")
+                                requete_fichier = f"
