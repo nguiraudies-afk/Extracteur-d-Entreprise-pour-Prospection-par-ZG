@@ -1,506 +1,413 @@
+from datetime import date, datetime
 import io
 import json
-import os
-import re
-import time
-import unicodedata
+from pathlib import Path
 from typing import Any, Optional
 
 import gspread
+from google.oauth2.service_account import Credentials
+import openpyxl
 import pandas as pd
 import requests
 import streamlit as st
-from google.oauth2.service_account import Credentials
-from googleapiclient.discovery import build
-
-# --- CONFIGURATION STREAMLIT ---
-st.set_page_config(
-    page_title="Extracteur de Prospection",
-    page_icon="⚡",
-    layout="wide",
-)
-
-# --- RÉFÉRENTIELS INSEE ---
-EFFECTIFS_LIBELLES: dict[str, str] = {
-    "NN": "Non renseigné",
-    "00": "0 salarié",
-    "01": "1 ou 2 salariés",
-    "02": "3 à 5 salariés",
-    "03": "6 à 9 salariés",
-    "11": "10 à 19 salariés",
-    "12": "20 à 49 salariés",
-    "21": "50 à 99 salariés",
-    "22": "100 à 199 salariés",
-    "31": "200 à 249 salariés",
-    "32": "250 à 499 salariés",
-    "41": "500 à 999 salariés",
-    "42": "1 000 à 1 999 salariés",
-    "51": "2 000 à 4 999 salariés",
-    "52": "5 000 à 9 999 salariés",
-    "53": "10 000 salariés et plus",
-}
-
-FORMES_JURIDIQUES_DE_BASE: dict[str, str] = {
-    "1000": "Entrepreneur individuel",
-    "5498": "EURL",
-    "5499": "SARL / Société à responsabilité limitée",
-    "5710": "SAS (Société par actions simplifiée)",
-    "5720": "SASU (Société par actions simplifiée unipersonnelle)",
-    "6540": "SCI (Société civile immobilière)",
-    "9220": "Association déclarée",
-}
 
 
-# --- CHARGEMENT DES RÉFÉRENTIELS JSON & UTILITAIRES ---
-@st.cache_data
-def charger_dictionnaire_json(nom_fichier: str, repli: Optional[dict[str, str]] = None) -> dict[str, str]:
-    dossier_script = os.path.dirname(os.path.abspath(__file__))
-    chemin_fichier = os.path.join(dossier_script, nom_fichier)
-    if os.path.exists(chemin_fichier):
-        with open(chemin_fichier, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            if isinstance(data, dict):
-                return {str(k).strip().upper(): str(v).strip() for k, v in data.items()}
-    return dict(repli) if repli else {}
+# ==============================================================================
+# CONFIGURATION
+# ==============================================================================
+API_URL = "https://recherche-entreprises.api.gouv.fr/search"
+FICHIER_CUIVRE = Path("calendrier_cuivre_orange.json")
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
 
 
-def normaliser_texte_commune(texte: Optional[str]) -> str:
-    if not texte:
+# ==============================================================================
+# UTILITAIRES & NORMALISATION
+# ==============================================================================
+def normaliser_code_ape(code: Any) -> str:
+    """Nettoie et uniformise un code APE / NAF (ex: '62.01z' -> '62.01Z')."""
+    if not code:
         return ""
-    s = unicodedata.normalize("NFKD", str(texte)).encode("ascii", "ignore").decode("ascii")
-    return re.sub(r"[^a-zA-Z0-9]+", " ", s).strip().upper()
+    return str(code).strip().upper()
 
 
-@st.cache_data
-def charger_calendrier_cuivre(nom_fichier: str = "calendrier_cuivre_orange.json") -> dict[str, Any]:
-    dossier_script = os.path.dirname(os.path.abspath(__file__))
-    chemin_fichier = os.path.join(dossier_script, nom_fichier)
-    if os.path.exists(chemin_fichier):
-        with open(chemin_fichier, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            if isinstance(data, dict):
-                return data
-    return {"communes": {}, "par_cp": {}, "par_commune": {}}
+def parser_date_flexible(valeur: Any) -> Optional[date]:
+    """Convertit une date (ISO AAAA-MM-JJ, FR JJ/MM/AAAA, date ou datetime) en objet date."""
+    if valeur is None:
+        return None
+    if isinstance(valeur, datetime):
+        return valeur.date()
+    if isinstance(valeur, date):
+        return valeur
+
+    texte = str(valeur).strip()
+    if not texte or texte.lower() in {
+        "non renseignée",
+        "non renseignee",
+        "none",
+        "nat",
+        "nan",
+        "null",
+    }:
+        return None
+
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%Y/%m/%d", "%d-%m-%Y"):
+        try:
+            return datetime.strptime(texte[:10], fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def formater_date_fr(valeur: Any, repli: str = "Non renseignée") -> str:
+    """Formate une date en JJ/MM/AAAA pour l'affichage."""
+    d = parser_date_flexible(valeur)
+    return d.strftime("%d/%m/%Y") if d else repli
+
+
+def normaliser_dates_cuivre(dates_brutes: Any) -> str:
+    """Trie chronologiquement et formate les dates cuivre (gère plusieurs dates séparées par ' / ')."""
+    if dates_brutes is None:
+        return "Non renseignée"
+
+    texte = str(dates_brutes).strip()
+    if not texte or texte.lower() in {"non renseignée", "non renseignee"}:
+        return "Non renseignée"
+
+    morceaux = [m.strip() for m in texte.split("/") if m.strip()]
+    # Cas d'une seule date au format JJ/MM/AAAA : on ne scinde pas les '/' de la date
+    if len(morceaux) == 3 and all(p.isdigit() for p in morceaux):
+        d = parser_date_flexible(texte)
+        return d.strftime("%d/%m/%Y") if d else texte
+
+    parties_multiples = [p.strip() for p in texte.split(" / ") if p.strip()]
+    dates_parsees: list[date] = []
+    autres: list[str] = []
+
+    for p in parties_multiples:
+        d = parser_date_flexible(p)
+        if d:
+            dates_parsees.append(d)
+        else:
+            autres.append(p)
+
+    formatees = [d.strftime("%d/%m/%Y") for d in sorted(set(dates_parsees))]
+    for a in autres:
+        if a not in formatees:
+            formatees.append(a)
+
+    return " / ".join(formatees) if formatees else "Non renseignée"
+
+
+# ==============================================================================
+# CHARGEMENT DU CALENDRIER RÉSEAU CUIVRE
+# ==============================================================================
+@st.cache_data(show_spinner=False)
+def charger_calendrier_cuivre(chemin: Path = FICHIER_CUIVRE) -> tuple[dict[str, tuple[str, str, str, str]], dict[str, list[str]]]:
+    """
+    Charge le fichier calendrier_cuivre_orange.json.
+    Retourne :
+      - communes : dict[code_insee, (code_insee, nom_commune, date_fermeture, lot)]
+      - par_cp : dict[code_postal, list[code_insee]]
+    """
+    communes: dict[str, tuple[str, str, str, str]] = {}
+    par_cp: dict[str, list[str]] = {}
+
+    if not chemin.exists():
+        return communes, par_cp
+
+    with chemin.open("r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    items = data if isinstance(data, list) else data.get("communes", [])
+
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+
+        code_insee = str(item.get("code_insee") or item.get("insee") or "").strip()
+        nom_commune = str(item.get("nom_commune") or item.get("commune") or "").strip()
+        date_fermeture = normaliser_dates_cuivre(
+            item.get("date_fermeture")
+            or item.get("date_fin_cuivre")
+            or item.get("date")
+            or "Non renseignée"
+        )
+        lot = str(item.get("lot") or item.get("lot_cuivre") or "Non renseigné").strip()
+
+        cps_bruts = item.get("codes_postaux") or item.get("code_postal") or []
+        if isinstance(cps_bruts, (str, int)):
+            cps = [str(cps_bruts).strip()]
+        elif isinstance(cps_bruts, list):
+            cps = [str(cp).strip() for cp in cps_bruts if str(cp).strip()]
+        else:
+            cps = []
+
+        cle_commune = code_insee or f"{nom_commune}_{'_'.join(cps)}"
+        if cle_commune:
+            communes[cle_commune] = (code_insee, nom_commune, date_fermeture, lot)
+            for cp in cps:
+                par_cp.setdefault(cp, [])
+                if cle_commune not in par_cp[cp]:
+                    par_cp[cp].append(cle_commune)
+
+    return communes, par_cp
 
 
 def trouver_info_cuivre(
-    calendrier: dict[str, Any],
     code_insee: Optional[str],
-    nom_commune: Optional[str],
     code_postal: Optional[str],
+    communes: dict[str, tuple[str, str, str, str]],
+    par_cp: dict[str, list[str]],
 ) -> tuple[str, str]:
-    """Retourne (date_fermeture_cuivre, lot_cuivre)."""
-    communes = calendrier.get("communes") or {}
-    par_cp = calendrier.get("par_cp") or {}
-    par_commune = calendrier.get("par_commune") or {}
-
+    """Retourne (date_fin_cuivre_formatee, lot_cuivre) à partir du code INSEE ou du code postal."""
     insee_clean = str(code_insee or "").strip()
-    if insee_clean in communes:
-        _, _, date_fin, lot = communes[insee_clean]
-        return date_fin or "Non renseignée", lot or ""
-
-    cle_commune = normaliser_texte_commune(nom_commune)
-    if cle_commune in par_commune and par_commune[cle_commune]:
-        insee_match = par_commune[cle_commune][0]
-        if insee_match in communes:
-            _, _, date_fin, lot = communes[insee_match]
-            return date_fin or "Non renseignée", lot or ""
+    if insee_clean and insee_clean in communes:
+        _, _, date_fermeture, lot = communes[insee_clean]
+        return normaliser_dates_cuivre(date_fermeture), lot or "Non renseigné"
 
     cp_clean = str(code_postal or "").strip()
-    if cp_clean in par_cp and par_cp[cp_clean]:
-        dates = sorted({communes[i][2] for i in par_cp[cp_clean] if i in communes and communes[i][2]})
-        lots = sorted({communes[i][3] for i in par_cp[cp_clean] if i in communes and communes[i][3]})
-        return " / ".join(dates) if dates else "Non renseignée", " / ".join(lots)
-
-    return "Non renseignée", ""
-
-
-def normaliser_code_ape(code_brut: Optional[str]) -> str:
-    code = (code_brut or "").strip().upper()
-    if len(code) == 5 and "." not in code:
-        return f"{code[:2]}.{code[2:]}"
-    return code
-
-
-def nettoyer_nom_fichier(nom_brut: str, code_postal: str) -> str:
-    nom = (nom_brut or "").strip()
-    if not nom:
-        return f"entreprises_{code_postal}"
-    if nom.lower().endswith(".xlsx"):
-        nom = nom[:-5]
-    return re.sub(r'[\\/*?:"<>|]', "_", nom)
-
-
-def a_procedure_collective(ent: dict[str, Any]) -> bool:
-    """Détecte un indicateur de procédure collective si présent dans les champs retournés."""
-    for conteneur_nom in ("complements", "finances"):
-        conteneur = ent.get(conteneur_nom)
-        if isinstance(conteneur, dict):
-            for cle, val in conteneur.items():
-                if "procedure" in str(cle).lower() and val:
-                    return True
-                if isinstance(val, dict):
-                    for sous_cle, sous_val in val.items():
-                        if "procedure" in str(sous_cle).lower() and sous_val:
-                            return True
-    return False
-
-
-# --- GOOGLE SHEETS & DRIVE (OPTIONNEL) ---
-def initialiser_connexion_google() -> tuple[Optional[gspread.Client], Any]:
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive",
-    ]
-    try:
-        if "gcp_service_account" in st.secrets:
-            secret_brut = st.secrets["gcp_service_account"]
-            info = json.loads(secret_brut) if isinstance(secret_brut, str) else dict(secret_brut)
-            creds = Credentials.from_service_account_info(info, scopes=scopes)
-            return gspread.authorize(creds), build("drive", "v3", credentials=creds)
-
-        chemin_creds = os.path.join(os.path.dirname(os.path.abspath(__file__)), "credentials.json")
-        if os.path.exists(chemin_creds):
-            creds = Credentials.from_service_account_file(chemin_creds, scopes=scopes)
-            return gspread.authorize(creds), build("drive", "v3", credentials=creds)
-    except Exception as e:
-        st.error(f"Erreur d'authentification Google : {e}")
-    return None, None
-
-
-def obtenir_ou_creer_dossier(drive_service: Any, nom_dossier: str) -> str:
-    requete = (
-        f"name = '{nom_dossier}' "
-        f"and mimeType = 'application/vnd.google-apps.folder' "
-        f"and trashed = false"
-    )
-    resultats = drive_service.files().list(q=requete, spaces="drive", fields="files(id, name)").execute()
-    fichiers = resultats.get("files", [])
-    if fichiers:
-        return fichiers[0]["id"]
-
-    metadonnees = {"name": nom_dossier, "mimeType": "application/vnd.google-apps.folder"}
-    dossier = drive_service.files().create(body=metadonnees, fields="id").execute()
-    return dossier.get("id")
-
-
-def enregistrer_dans_drive(df: pd.DataFrame, nom_dossier: str, nom_sheet: str) -> None:
-    gc, drive_service = initialiser_connexion_google()
-    if not gc or not drive_service:
-        st.warning("⚠️ Connexion Google Drive indisponible (vérifiez vos secrets ou `credentials.json`).")
-        return
-
-    with st.spinner("💾 Enregistrement dans Google Drive..."):
-        id_dossier_cible = obtenir_ou_creer_dossier(drive_service, nom_dossier)
-        requete_fichier = (
-            f"name = '{nom_sheet}' "
-            f"and '{id_dossier_cible}' in parents "
-            f"and mimeType = 'application/vnd.google-apps.spreadsheet' "
-            f"and trashed = false"
+    if cp_clean and cp_clean in par_cp and par_cp[cp_clean]:
+        dates = sorted(
+            {
+                communes[i][2]
+                for i in par_cp[cp_clean]
+                if i in communes and communes[i][2] and communes[i][2] != "Non renseignée"
+            }
         )
-        fichiers_existants = drive_service.files().list(q=requete_fichier, fields="files(id)").execute().get("files", [])
+        lots = sorted(
+            {
+                communes[i][3]
+                for i in par_cp[cp_clean]
+                if i in communes and communes[i][3] and communes[i][3] != "Non renseigné"
+            }
+        )
+        dates_str = normaliser_dates_cuivre(" / ".join(dates)) if dates else "Non renseignée"
+        lots_str = " / ".join(lots) if lots else "Non renseigné"
+        return dates_str, lots_str
 
-        if fichiers_existants:
-            sh = gc.open_by_key(fichiers_existants[0]["id"])
-        else:
-            sh = gc.create(nom_sheet)
-            id_fichier = sh.id
-            fichier = drive_service.files().get(fileId=id_fichier, fields="parents").execute()
-            parents_precedents = ",".join(fichier.get("parents", []))
-            drive_service.files().update(
-                fileId=id_fichier,
-                addParents=id_dossier_cible,
-                removeParents=parents_precedents,
-                fields="id, parents",
-            ).execute()
-
-        df_drive = df.fillna("")
-        worksheet = sh.get_worksheet(0)
-        worksheet.clear()
-        worksheet.update([df_drive.columns.values.tolist()] + df_drive.values.tolist())
-        st.success(f"☁️ Fichier synchronisé dans Google Drive (`{nom_dossier}/{nom_sheet}`).")
+    return "Non renseignée", "Non renseigné"
 
 
-# --- APPELS API ---
-def obtenir_code_postal_par_ville(nom_ville: str) -> tuple[Optional[str], Optional[str]]:
-    url_geo = "https://geo.api.gouv.fr/communes"
-    params = {"nom": nom_ville, "fields": "codesPostaux", "boost": "population", "limit": 1}
-    try:
-        response = requests.get(url_geo, params=params, timeout=10)
-        if response.status_code == 200:
-            resultats = response.json()
-            if resultats and resultats[0].get("codesPostaux"):
-                return resultats[0]["codesPostaux"][0], resultats[0].get("nom")
-    except requests.exceptions.RequestException as e:
-        st.error(f"Erreur recherche ville : {e}")
-    return None, None
-
-
-def requeter_page_entreprises(
-    code_postal: str,
-    page: int,
-    per_page: int,
-    placeholder_progression: Any,
-) -> tuple[Optional[dict[str, Any]], bool]:
-    url = "https://recherche-entreprises.api.gouv.fr/search"
-    params = {
-        "code_postal": code_postal,
-        "etat_administratif": "A",
-        "page": page,
+# ==============================================================================
+# RECHERCHE & FORMATAGE DES ENTREPRISES
+# ==============================================================================
+def rechercher_entreprises_api(
+    requete: str = "",
+    code_postal: str = "",
+    departement: str = "",
+    code_ape: str = "",
+    max_pages: int = 3,
+    per_page: int = 25,
+) -> list[dict[str, Any]]:
+    """Appelle l'API Recherche d'Entreprises et retourne la liste brute des résultats."""
+    params_base: dict[str, Any] = {
         "per_page": per_page,
+        "etat_administratif": "A",  # Entreprises actives
     }
+    if requete.strip():
+        params_base["q"] = requete.strip()
+    if code_postal.strip():
+        params_base["code_postal"] = code_postal.strip()
+    if departement.strip():
+        params_base["departement"] = departement.strip()
+    if code_ape.strip():
+        params_base["activite_principale"] = normaliser_code_ape(code_ape)
 
-    for tentative in range(4):
-        try:
-            response = requests.get(url, params=params, timeout=15)
-            if response.status_code == 429:
-                attente = 2 * (tentative + 1)
-                placeholder_progression.text(
-                    f"⏳ Limite API atteinte (429), pause de {attente}s avant nouvelle tentative..."
-                )
-                time.sleep(attente)
-                continue
+    resultats: list[dict[str, Any]] = []
+    for page in range(1, max_pages + 1):
+        params = {**params_base, "page": page}
+        resp = requests.get(API_URL, params=params, timeout=20)
+        resp.raise_for_status()
+        payload = resp.json()
+        batch = payload.get("results", [])
+        if not batch:
+            break
+        resultats.extend(batch)
+        if page >= payload.get("total_pages", page):
+            break
 
-            if response.status_code != 200:
-                st.error(f"Erreur API (Code {response.status_code})")
-                return None, False
-
-            return response.json(), True
-        except requests.exceptions.RequestException:
-            if tentative == 3:
-                st.error("❌ Connexion interrompue avec l'API après plusieurs tentatives.")
-                return None, False
-            time.sleep(2)
-
-    st.error("Erreur API (Code 429) : trop de requêtes envoyées. Patiente quelques instants puis relance.")
-    return None, False
+    return resultats
 
 
 def formater_entreprise(
     ent: dict[str, Any],
-    code_postal_cible: str,
-    libelles_naf: dict[str, str],
-    formes_juridiques: dict[str, str],
-    calendrier_cuivre: dict[str, Any],
-    exclure_procedures: bool,
-) -> Optional[dict[str, Any]]:
-    etat_ent = str(ent.get("etat_administratif") or "A").strip().upper()
+    communes: dict[str, tuple[str, str, str, str]],
+    par_cp: dict[str, list[str]],
+) -> dict[str, Any]:
+    """Transforme un résultat brut de l'API en ligne structurée avec dates normalisées."""
     siege = ent.get("siege") or {}
-    etat_siege = str(siege.get("etat_administratif") or "A").strip().upper()
+    code_insee = siege.get("commune") or ""
+    code_postal = siege.get("code_postal") or ""
 
-    if etat_ent != "A" or etat_siege != "A":
-        return None
-
-    if exclure_procedures and a_procedure_collective(ent):
-        return None
-
-    if str(siege.get("code_postal") or "").strip() != str(code_postal_cible).strip():
-        return None
-
-    finances = ent.get("finances") or {}
-    ca: Any = "Non publié"
-    resultat_net: Any = "Non publié"
-    annee_bilan = ""
-
-    if isinstance(finances, dict) and finances:
-        derniere_annee = max(finances.keys())
-        bilan = finances.get(derniere_annee) or {}
-        annee_bilan = str(derniere_annee)
-        ca_val = bilan.get("ca")
-        res_val = bilan.get("resultat_net")
-        ca = "Non publié" if ca_val is None else ca_val
-        resultat_net = "Non publié" if res_val is None else res_val
-
-    code_eff = str(ent.get("tranche_effectif_salarie") or "NN").strip().upper()
-    score_tri = int(code_eff) if code_eff.isdigit() else -1
-
-    raison_sociale = ent.get("nom_raison_sociale") or ent.get("nom_complet") or ""
-    enseignes = siege.get("liste_enseignes") or []
-    enseigne_str = ", ".join(str(x) for x in enseignes) if isinstance(enseignes, list) else str(enseignes)
-
-    code_ape = normaliser_code_ape(ent.get("activite_principale") or siege.get("activite_principale"))
-    libelle_activite = (
-        ent.get("libelle_activite_principale")
-        or siege.get("libelle_activite_principale")
-        or libelles_naf.get(code_ape)
-        or (f"Code APE {code_ape}" if code_ape else "Non renseignée")
-    )
-
-    code_nj = str(ent.get("nature_juridique") or "").strip().upper()
-    forme_juridique = formes_juridiques.get(code_nj, f"Code {code_nj}" if code_nj else "Non renseignée")
-
-    code_insee = siege.get("code_commune") or ent.get("code_commune")
     date_fin_cuivre, lot_cuivre = trouver_info_cuivre(
-        calendrier=calendrier_cuivre,
         code_insee=code_insee,
-        nom_commune=siege.get("libelle_commune", ""),
-        code_postal=siege.get("code_postal"),
+        code_postal=code_postal,
+        communes=communes,
+        par_cp=par_cp,
     )
+
+    date_creation_formatee = formater_date_fr(ent.get("date_creation"), repli="Non renseignée")
+    date_fin_cuivre_formatee = normaliser_dates_cuivre(date_fin_cuivre)
 
     return {
-        "SIREN": ent.get("siren"),
-        "Raison Sociale": raison_sociale,
-        "Enseigne": enseigne_str,
-        "Code APE": code_ape,
-        "Activité": libelle_activite,
-        "Adresse": siege.get("adresse"),
-        "Code Postal": siege.get("code_postal"),
-        "Ville": siege.get("libelle_commune", ""),
-        "Fin Réseau Cuivre": date_fin_cuivre,
+        "SIREN": ent.get("siren") or "",
+        "SIRET siège": siege.get("siret") or "",
+        "Dénomination": ent.get("nom_complet") or ent.get("nom_raison_sociale") or "",
+        "Code APE": normaliser_code_ape(ent.get("activite_principale") or siege.get("activite_principale")),
+        "Adresse siège": siege.get("geo_adresse") or siege.get("adresse") or "",
+        "Code postal": code_postal,
+        "Commune": siege.get("libelle_commune") or "",
+        "Code INSEE": code_insee,
+        "Date de création": date_creation_formatee,
+        "Fin Réseau Cuivre": date_fin_cuivre_formatee,
         "Lot Cuivre": lot_cuivre,
-        "Date de création": ent.get("date_creation"),
-        "Catégorie": ent.get("categorie_entreprise") or "EI / Non classé",
-        "Tranche Effectif": EFFECTIFS_LIBELLES.get(code_eff, "Inconnu"),
-        "Score Tri": score_tri,
-        "Année Bilan": annee_bilan,
-        "Chiffre d'Affaires (€)": ca,
-        "Résultat Net (€)": resultat_net,
-        "Statut": "Actif",
-        "Forme Juridique": forme_juridique,
     }
 
 
-def trier_et_preparer_dataframe(lignes: list[dict[str, Any]], ville_prioritaire: Optional[str]) -> pd.DataFrame:
-    df = pd.DataFrame(lignes)
-    if df.empty:
-        return df
+# ==============================================================================
+# EXPORTS (EXCEL & GOOGLE SHEETS)
+# ==============================================================================
+def generer_excel_bytes(df: pd.DataFrame) -> bytes:
+    """Génère un classeur Excel (.xlsx) avec de vraies dates au format JJ/MM/AAAA."""
+    df_excel = df.copy()
+    if "Date de création" in df_excel.columns:
+        df_excel["Date de création"] = df_excel["Date de création"].apply(parser_date_flexible)
 
-    if ville_prioritaire:
-        cible_lower = ville_prioritaire.strip().lower()
-        df["Priorité Ville"] = df["Ville"].apply(lambda x: 1 if str(x).strip().lower() == cible_lower else 2)
-        df = df.sort_values(
-            by=["Priorité Ville", "Score Tri", "Raison Sociale"],
-            ascending=[True, False, True],
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        df_excel.to_excel(writer, index=False, sheet_name="Entreprises")
+        ws = writer.sheets["Entreprises"]
+
+        if "Date de création" in df_excel.columns:
+            col_idx = df_excel.columns.get_loc("Date de création") + 1
+            for cell in ws.iter_cols(min_col=col_idx, max_col=col_idx, min_row=2):
+                for c in cell:
+                    if c.value is not None:
+                        c.number_format = "DD/MM/YYYY"
+
+        # Ajustement léger de la largeur des colonnes
+        for column_cells in ws.columns:
+            max_len = max(len(str(cell.value or "")) for cell in column_cells)
+            col_letter = column_cells[0].column_letter
+            ws.column_dimensions[col_letter].width = min(max(max_len + 3, 12), 45)
+
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
+def enregistrer_dans_drive(df: pd.DataFrame, spreadsheet_id: str, nom_onglet: str = "Export") -> None:
+    """Envoie le DataFrame (chaînes 'JJ/MM/AAAA' conservées) vers une feuille Google Sheets."""
+    creds_info = dict(st.secrets["gcp_service_account"])
+    creds = Credentials.from_service_account_info(creds_info, scopes=SCOPES)
+    client = gspread.authorize(creds)
+
+    sh = client.open_by_key(spreadsheet_id)
+    try:
+        ws = sh.worksheet(nom_onglet)
+        ws.clear()
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(title=nom_onglet, rows=max(len(df) + 10, 100), cols=max(len(df.columns) + 5, 15))
+
+    df_clean = df.fillna("")
+    lignes = [df_clean.columns.tolist()] + df_clean.astype(str).values.tolist()
+    ws.update("A1", lignes)
+
+
+# ==============================================================================
+# INTERFACE STREAMLIT
+# ==============================================================================
+def main() -> None:
+    st.set_page_config(page_title="Recherche Entreprises & Réseau Cuivre", layout="wide")
+    st.title("Recherche d'entreprises & calendrier Réseau Cuivre")
+
+    communes, par_cp = charger_calendrier_cuivre(FICHIER_CUIVRE)
+    if not communes:
+        st.warning(
+            f"Le fichier `{FICHIER_CUIVRE}` est introuvable ou vide. "
+            "La colonne « Fin Réseau Cuivre » affichera « Non renseignée »."
         )
-        return df.drop(columns=["Priorité Ville", "Score Tri"])
 
-    df = df.sort_values(by=["Score Tri", "Raison Sociale"], ascending=[False, True])
-    return df.drop(columns=["Score Tri"])
+    with st.form("formulaire_recherche"):
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            requete = st.text_input("Mot-clé / Raison sociale / SIREN", placeholder="Ex: boulangerie")
+        with col2:
+            code_postal = st.text_input("Code postal", placeholder="Ex: 37000")
+        with col3:
+            departement = st.text_input("Département", placeholder="Ex: 37")
+        with col4:
+            code_ape = st.text_input("Code APE", placeholder="Ex: 10.71C")
 
+        col_f1, col_f2 = st.columns(2)
+        with col_f1:
+            date_creation_min = st.date_input(
+                "Créées à partir du (optionnel)",
+                value=None,
+                format="DD/MM/YYYY",
+            )
+        with col_f2:
+            masquer_cuivre_inconnu = st.checkbox("Masquer les lignes sans date cuivre connue", value=False)
 
-# --- INTERFACE UTILISATEUR ---
-libelles_naf = charger_dictionnaire_json("codes_naf_rev2.json")
-formes_juridiques = charger_dictionnaire_json("formes_juridiques.json", FORMES_JURIDIQUES_DE_BASE)
-calendrier_cuivre = charger_calendrier_cuivre("calendrier_cuivre_orange.json")
+        soumis = st.form_submit_button("Rechercher", type="primary")
 
-st.title("⚡ Extracteur de Prospection Automatique")
-st.markdown("Saisissez une ville ou un code postal pour extraire les entreprises actives triées par effectif.")
-
-if not libelles_naf:
-    st.warning("⚠️ Fichier `codes_naf_rev2.json` introuvable à côté de `App.py`.")
-if len(formes_juridiques) <= len(FORMES_JURIDIQUES_DE_BASE):
-    st.info("ℹ️ Fichier `formes_juridiques.json` non détecté : un dictionnaire de base est utilisé.")
-if not calendrier_cuivre.get("communes"):
-    st.warning("⚠️ Fichier `calendrier_cuivre_orange.json` introuvable ou vide à côté de `App.py`.")
-
-with st.form("form_extraction"):
-    col1, col2 = st.columns(2)
-    with col1:
-        ville_ou_cp = st.text_input("Ville ou Code Postal", value="37350", placeholder="Ex: 37000 ou Tours")
-    with col2:
-        nom_fichier_perso = st.text_input(
-            "Nom du fichier de sortie (sans .xlsx)",
-            placeholder="Ex: Prospection_Tours_2026 (laisser vide pour auto)",
-        )
-
-    exclure_procedures = st.checkbox(
-        "Exclure les entreprises avec procédure collective détectée",
-        value=True,
-    )
-
-    with st.expander("⚙️ Options Google Drive (Facultatif)"):
-        sauvegarder_drive = st.checkbox(
-            "Enregistrer aussi dans Google Drive (nécessite une clé Google Cloud)",
-            value=False,
-        )
-        nom_dossier_drive = st.text_input("Nom du dossier Google Drive", value="Liste Prospection")
-
-    bouton_lancer = st.form_submit_button("🚀 Lancer l'extraction")
-
-if bouton_lancer:
-    saisie = ville_ou_cp.strip()
-    dossier_nom = nom_dossier_drive.strip() or "Liste Prospection"
-
-    if not saisie:
-        st.warning("⚠️ Veuillez remplir le champ 'Ville ou Code Postal'.")
-    else:
-        with st.spinner("🔍 Analyse de la localisation..."):
-            if saisie.isdigit():
-                code_postal_final: Optional[str] = saisie
-                ville_prioritaire: Optional[str] = None
-            else:
-                code_postal_final, ville_prioritaire = obtenir_code_postal_par_ville(saisie)
-
-        if not code_postal_final:
-            st.error(f"❌ Impossible de trouver un code postal pour '{saisie}'.")
-        else:
-            nom_base_fichier = nettoyer_nom_fichier(nom_fichier_perso, code_postal_final)
-            cible_texte = f" ({ville_prioritaire})" if ville_prioritaire else ""
-            st.info(f"📍 Cible : Code Postal {code_postal_final}{cible_texte} | 📄 Fichier : `{nom_base_fichier}.xlsx`")
-
-            with st.spinner("⏳ Extraction en cours depuis l'API nationale des entreprises..."):
-                page = 1
-                per_page = 25
-                resultats_finaux: list[dict[str, Any]] = []
-                placeholder_progression = st.empty()
-
-                while True:
-                    data, ok = requeter_page_entreprises(
-                        code_postal=code_postal_final,
-                        page=page,
-                        per_page=per_page,
-                        placeholder_progression=placeholder_progression,
-                    )
-                    if not ok or not data:
-                        break
-
-                    entreprises = data.get("results") or []
-                    total_pages = int(data.get("total_pages") or 1)
-
-                    if not entreprises:
-                        break
-
-                    for ent in entreprises:
-                        ligne = formater_entreprise(
-                            ent=ent,
-                            code_postal_cible=code_postal_final,
-                            libelles_naf=libelles_naf,
-                            formes_juridiques=formes_juridiques,
-                            calendrier_cuivre=calendrier_cuivre,
-                            exclure_procedures=exclure_procedures,
-                        )
-                        if ligne:
-                            resultats_finaux.append(ligne)
-
-                    placeholder_progression.text(
-                        f"Extraction en cours... Page {page}/{total_pages} ({len(resultats_finaux)} entreprises trouvées)"
-                    )
-
-                    if page >= total_pages:
-                        break
-                    page += 1
-                    time.sleep(0.35)
-
-                placeholder_progression.empty()
-
-            df_final = trier_et_preparer_dataframe(resultats_finaux, ville_prioritaire)
-
-            if df_final.empty:
-                st.info("Aucune entreprise active trouvée pour ce critère.")
-            else:
-                buffer = io.BytesIO()
-                with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-                    df_final.to_excel(writer, index=False, sheet_name="Entreprises")
-
-                st.success(f"✅ {len(df_final)} entreprises actives trouvées !")
-                st.dataframe(df_final.head(50), use_container_width=True)
-
-                st.download_button(
-                    label=f"📥 Télécharger {nom_base_fichier}.xlsx",
-                    data=buffer.getvalue(),
-                    file_name=f"{nom_base_fichier}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    if soumis:
+        try:
+            with st.spinner("Recherche en cours..."):
+                bruts = rechercher_entreprises_api(
+                    requete=requete,
+                    code_postal=code_postal,
+                    departement=departement,
+                    code_ape=code_ape,
                 )
+                lignes = [formater_entreprise(ent, communes, par_cp) for ent in bruts]
+                df_final = pd.DataFrame(lignes)
 
-                if sauvegarder_drive:
-                    enregistrer_dans_drive(df_final, dossier_nom, nom_base_fichier)
+                if not df_final.empty:
+                    if date_creation_min:
+                        dates_dt = df_final["Date de création"].apply(parser_date_flexible)
+                        df_final = df_final[dates_dt.apply(lambda d: d is not None and d >= date_creation_min)]
+
+                    if masquer_cuivre_inconnu:
+                        df_final = df_final[df_final["Fin Réseau Cuivre"] != "Non renseignée"]
+
+                st.session_state["df_final"] = df_final
+        except requests.RequestException as exc:
+            st.error(f"Erreur lors de l'appel à l'API : {exc}")
+
+    df_final = st.session_state.get("df_final")
+    if df_final is not None:
+        if df_final.empty:
+            st.info("Aucune entreprise active trouvée pour ce critère.")
+        else:
+            st.success(f"{len(df_final)} entreprise(s) trouvée(s).")
+            st.dataframe(df_final, use_container_width=True, hide_index=True)
+
+            excel_bytes = generer_excel_bytes(df_final)
+            st.download_button(
+                label="Télécharger l'export Excel (.xlsx)",
+                data=excel_bytes,
+                file_name=f"entreprises_cuivre_{date.today().strftime('%Y%m%d')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+
+            spreadsheet_id = st.text_input(
+                "ID du Google Sheet cible (optionnel)",
+                placeholder="Ex: 1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms",
+            )
+            if st.button("Envoyer vers Google Sheets"):
+                if not spreadsheet_id.strip():
+                    st.warning("Renseigne l'ID du Google Sheet avant l'envoi.")
+                else:
+                    try:
+                        with st.spinner("Envoi vers Google Sheets..."):
+                            enregistrer_dans_drive(df_final, spreadsheet_id.strip())
+                        st.success("Export envoyé avec succès vers Google Sheets !")
+                    except Exception as exc:
+                        st.error(f"Erreur lors de l'envoi vers Google Sheets : {exc}")
+
+
+if __name__ == "__main__":
+    main()
