@@ -225,7 +225,11 @@ def requeter_page_entreprises(
     return None, False
 
 
-def formater_entreprise(ent: dict[str, Any], code_postal_cible: str, libelles_naf: dict[str, str]) -> Optional[dict[str, Any]]:
+def formater_entreprise(
+    ent: dict[str, Any],
+    code_postal_cible: str,
+    libelles_naf: dict[str, str],
+) -> Optional[dict[str, Any]]:
     siege = ent.get("siege") or {}
     if str(siege.get("code_postal") or "").strip() != str(code_postal_cible).strip():
         return None
@@ -263,4 +267,152 @@ def formater_entreprise(ent: dict[str, Any], code_postal_cible: str, libelles_na
     forme_juridique = FORMES_JURIDIQUES.get(code_nj, f"Code {code_nj}" if code_nj else "Non renseignée")
 
     return {
-        "SIREN
+        "SIREN": ent.get("siren"),
+        "Raison Sociale": raison_sociale,
+        "Enseigne": enseigne_str,
+        "Code APE": code_ape,
+        "Activité": libelle_activite,
+        "Adresse": siege.get("adresse"),
+        "Code Postal": siege.get("code_postal"),
+        "Ville": siege.get("libelle_commune", ""),
+        "Date de création": ent.get("date_creation"),
+        "Catégorie": ent.get("categorie_entreprise") or "EI / Non classé",
+        "Tranche Effectif": EFFECTIFS_LIBELLES.get(code_eff, "Inconnu"),
+        "Score Tri": score_tri,
+        "Année Bilan": annee_bilan,
+        "Chiffre d'Affaires (€)": ca,
+        "Résultat Net (€)": resultat_net,
+        "Statut": "Actif",
+        "Forme Juridique": forme_juridique,
+    }
+
+
+def trier_et_preparer_dataframe(lignes: list[dict[str, Any]], ville_prioritaire: Optional[str]) -> pd.DataFrame:
+    df = pd.DataFrame(lignes)
+    if df.empty:
+        return df
+
+    if ville_prioritaire:
+        cible_lower = ville_prioritaire.strip().lower()
+        df["Priorité Ville"] = df["Ville"].apply(lambda x: 1 if str(x).strip().lower() == cible_lower else 2)
+        df = df.sort_values(
+            by=["Priorité Ville", "Score Tri", "Raison Sociale"],
+            ascending=[True, False, True],
+        )
+        return df.drop(columns=["Priorité Ville", "Score Tri"])
+
+    df = df.sort_values(by=["Score Tri", "Raison Sociale"], ascending=[False, True])
+    return df.drop(columns=["Score Tri"])
+
+
+# --- INTERFACE UTILISATEUR ---
+libelles_naf = charger_libelles_naf()
+
+st.title("⚡ Extracteur de Prospection Automatique")
+st.markdown("Saisissez une ville ou un code postal pour extraire les entreprises actives triées par effectif.")
+
+if not libelles_naf:
+    st.warning(
+        "⚠️ Fichier `codes_naf_rev2.json` introuvable à côté de `App.py` : "
+        "seuls les libellés renvoyés par l'API seront utilisés."
+    )
+
+with st.form("form_extraction"):
+    col1, col2 = st.columns(2)
+    with col1:
+        ville_ou_cp = st.text_input("Ville ou Code Postal", value="37350", placeholder="Ex: 37000 ou Tours")
+    with col2:
+        nom_fichier_perso = st.text_input(
+            "Nom du fichier de sortie (sans .xlsx)",
+            placeholder="Ex: Prospection_Tours_2026 (laisser vide pour auto)",
+        )
+
+    with st.expander("⚙️ Options Google Drive (Facultatif)"):
+        sauvegarder_drive = st.checkbox(
+            "Enregistrer aussi dans Google Drive (nécessite une clé Google Cloud)",
+            value=False,
+        )
+        nom_dossier_drive = st.text_input("Nom du dossier Google Drive", value="Liste Prospection")
+
+    bouton_lancer = st.form_submit_button("🚀 Lancer l'extraction")
+
+if bouton_lancer:
+    saisie = ville_ou_cp.strip()
+    dossier_nom = nom_dossier_drive.strip() or "Liste Prospection"
+
+    if not saisie:
+        st.warning("⚠️ Veuillez remplir le champ 'Ville ou Code Postal'.")
+    else:
+        with st.spinner("🔍 Analyse de la localisation..."):
+            if saisie.isdigit():
+                code_postal_final: Optional[str] = saisie
+                ville_prioritaire: Optional[str] = None
+            else:
+                code_postal_final, ville_prioritaire = obtenir_code_postal_par_ville(saisie)
+
+        if not code_postal_final:
+            st.error(f"❌ Impossible de trouver un code postal pour '{saisie}'.")
+        else:
+            nom_base_fichier = nettoyer_nom_fichier(nom_fichier_perso, code_postal_final)
+            cible_texte = f" ({ville_prioritaire})" if ville_prioritaire else ""
+            st.info(f"📍 Cible : Code Postal {code_postal_final}{cible_texte} | 📄 Fichier : `{nom_base_fichier}.xlsx`")
+
+            with st.spinner("⏳ Extraction en cours depuis l'API nationale des entreprises..."):
+                page = 1
+                per_page = 25
+                resultats_finaux: list[dict[str, Any]] = []
+                placeholder_progression = st.empty()
+
+                while True:
+                    data, ok = requeter_page_entreprises(
+                        code_postal=code_postal_final,
+                        page=page,
+                        per_page=per_page,
+                        placeholder_progression=placeholder_progression,
+                    )
+                    if not ok or not data:
+                        break
+
+                    entreprises = data.get("results") or []
+                    total_pages = int(data.get("total_pages") or 1)
+
+                    if not entreprises:
+                        break
+
+                    for ent in entreprises:
+                        ligne = formater_entreprise(ent, code_postal_final, libelles_naf)
+                        if ligne:
+                            resultats_finaux.append(ligne)
+
+                    placeholder_progression.text(
+                        f"Extraction en cours... Page {page}/{total_pages} ({len(resultats_finaux)} entreprises trouvées)"
+                    )
+
+                    if page >= total_pages:
+                        break
+                    page += 1
+                    time.sleep(0.35)
+
+                placeholder_progression.empty()
+
+            df_final = trier_et_preparer_dataframe(resultats_finaux, ville_prioritaire)
+
+            if df_final.empty:
+                st.info("Aucune entreprise active trouvée pour ce critère.")
+            else:
+                buffer = io.BytesIO()
+                with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+                    df_final.to_excel(writer, index=False, sheet_name="Entreprises")
+
+                st.success(f"✅ {len(df_final)} entreprises actives trouvées !")
+                st.dataframe(df_final.head(50), use_container_width=True)
+
+                st.download_button(
+                    label=f"📥 Télécharger {nom_base_fichier}.xlsx",
+                    data=buffer.getvalue(),
+                    file_name=f"{nom_base_fichier}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+
+                if sauvegarder_drive:
+                    enregistrer_dans_drive(df_final, dossier_nom, nom_base_fichier)
