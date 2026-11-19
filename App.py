@@ -256,12 +256,7 @@ if bouton_lancer:
         else:
             nom_base_fichier = nettoyer_nom_fichier(nom_fichier_perso, code_postal_final)
             cible_texte = f" ({ville_prioritaire})" if ville_prioritaire else ""
-            st.info(f"🎯 **{len(df_filtre)}** entreprise(s) sélectionnée(s) pour l'export.")
-    try:
-        st.dataframe(df_filtre.astype(str), use_container_width=True)
-    except Exception as e:
-        st.warning(f"Aperçu simplifié du tableau ({e})")
-        st.write(df_filtre.head(20))
+            st.info(f"📍 Cible : Code Postal {code_postal_final}{cible_texte} | 📄 Fichier : `{nom_base_fichier}.xlsx`")
 
             with st.spinner("⏳ Extraction en cours depuis l'API nationale des entreprises..."):
                 url = "https://recherche-entreprises.api.gouv.fr/search"
@@ -426,11 +421,3 @@ if bouton_lancer:
                                 worksheet = sh.get_worksheet(0)
                                 worksheet.clear()
                                 worksheet.update([df_drive.columns.values.tolist()] + df_drive.values.tolist())
-
-                            st.success(f"☁️ Fichier également sauvegardé dans Google Drive : « {dossier_nom} > {nom_sheet} ».")
-                        else:
-                            st.warning("⚠️ La sauvegarde Google Drive a été ignorée car aucune clé d'accès Google Cloud n'est configurée.")
-
-                    st.dataframe(df, use_container_width=True)
-                else:
-                    st.info("Aucune entreprise active trouvée pour cette recherche.")
