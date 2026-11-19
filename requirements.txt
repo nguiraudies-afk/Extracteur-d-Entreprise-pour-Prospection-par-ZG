@@ -1,7 +1,7 @@
-streamlit
-pandas
-requests
-openpyxl
-gspread
-google-api-python-client
-google-auth
+streamlit>=1.35.0
+pandas>=2.0.0
+requests>=2.31.0
+openpyxl>=3.1.0
+gspread>=6.0.0
+google-auth>=2.29.0
+google-api-python-client>=2.125.0
