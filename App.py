@@ -59,7 +59,7 @@ def obtenir_code_postal_par_ville(nom_ville):
     url_geo = "https://geo.api.gouv.fr/communes"
     params = {"nom": nom_ville, "fields": "codesPostaux", "boost": "population", "limit": 1}
     try:
-        response = requests.get(url_geo, params=params)
+        response = requests.get(url_geo, params=params, timeout=10)
         if response.status_code == 200:
             resultats = response.json()
             if resultats and "codesPostaux" in resultats[0]:
@@ -106,7 +106,6 @@ with st.form("form_extraction"):
         sauvegarder_drive = st.checkbox("Enregistrer aussi dans Google Drive (nécessite une clé Google Cloud)", value=False)
         nom_dossier_drive = st.text_input("Nom du dossier Google Drive", value="Liste Prospection")
         
-    # BOUTON DE VALIDATION DU FORMULAIRE
     bouton_lancer = st.form_submit_button("🚀 Lancer l'extraction")
 
 if bouton_lancer:
@@ -138,10 +137,33 @@ if bouton_lancer:
 
                 while True:
                     params = {"code_postal": code_postal_final, "etat_administratif": "A", "page": page, "per_page": per_page}
-                    response = requests.get(url, params=params)
+                    
+                    # --- BLOC SÉCURISÉ (GESTION ERREUR 429 ET COUPURES RÉSEAU) ---
+                    response = None
+                    for tentative in range(4):
+                        try:
+                            response = requests.get(url, params=params, timeout=15)
+                            if response.status_code == 429:
+                                attente = 2 * (tentative + 1)
+                                placeholder_progression.text(f"⏳ Limite API atteinte (429), pause de {attente}s avant nouvelle tentative...")
+                                time.sleep(attente)
+                                continue
+                            break
+                        except requests.exceptions.RequestException:
+                            if tentative == 3:
+                                st.error("❌ Connexion interrompue avec l'API après plusieurs tentatives.")
+                                response = None
+                                break
+                            time.sleep(2)
+
+                    if response is None or response.status_code == 429:
+                        st.error("Erreur API (Code 429) : trop de requêtes envoyées. Patiente quelques instants puis relance.")
+                        break
+
                     if response.status_code != 200:
                         st.error(f"Erreur API (Code {response.status_code})")
                         break
+                    # -----------------------------------------------------------
 
                     data = response.json()
                     entreprises = data.get("results", [])
@@ -188,7 +210,7 @@ if bouton_lancer:
                     if page >= total_pages:
                         break
                     page += 1
-                    time.sleep(0.15)
+                    time.sleep(0.35)
 
                 placeholder_progression.empty()
 
