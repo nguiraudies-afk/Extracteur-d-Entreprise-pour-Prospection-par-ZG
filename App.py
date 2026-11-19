@@ -272,4 +272,31 @@ if bouton_lancer:
                             "Code APE": code_ape,
                             "Activité": libelle_activite,
                             "Adresse": siege.get("adresse"),
-                            "Code Postal": siege.get("code
+                            "Code Postal": siege.get("code_postal"),
+                            "Ville": libelle_commune,
+                            "Date de création": ent.get("date_creation"),
+                            "Catégorie": ent.get("categorie_entreprise") or "EI / Non classé",
+                            "Tranche Effectif": EFFECTIFS_LIBELLES.get(code_eff, "Inconnu"),
+                            "Score Tri": score_tri,
+                            "Année Bilan": annee_bilan,
+                            "Chiffre d'Affaires (€)": ca,
+                            "Résultat Net (€)": resultat_net,
+                            "Statut": "Actif",
+                            "Forme Juridique": forme_juridique
+                        })
+
+                    placeholder_progression.text(f"Extraction en cours... Page {page}/{total_pages} ({len(resultats_finaux)} entreprises trouvées)")
+
+                    if page >= total_pages:
+                        break
+                    page += 1
+                    time.sleep(0.35)
+
+                placeholder_progression.empty()
+
+                df = pd.DataFrame(resultats_finaux)
+                if not df.empty:
+                    if ville_prioritaire:
+                        nom_cible_lower = ville_prioritaire.strip().lower()
+                        df["Priorité Ville"] = df["Ville"].apply(lambda x: 1 if str(x).strip().lower() == nom_cible_lower else 2)
+                        df = df.sort_values(by=["Priorité Ville",
