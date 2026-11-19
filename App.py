@@ -64,103 +64,24 @@ FORMES_JURIDIQUES = {
     "9300": "Fondation"
 }
 
-# Dictionnaire élargi des codes NAF / APE les plus courants en prospection
-LIBELLES_NAF = {
-    # Agriculture & Espaces verts
-    "01.13Z": "Culture de légumes, de melons, de racines et de tubercules",
-    "01.61Z": "Activités de soutien aux cultures",
-    "02.20Z": "Exploitation forestière",
-    "81.30Z": "Services d'aménagement paysager",
 
-    # BTP & Construction
-    "41.20A": "Construction de maisons individuelles",
-    "41.20B": "Construction d'autres bâtiments",
-    "42.11Z": "Construction de routes et autoroutes",
-    "43.11Z": "Travaux de démolition",
-    "43.12A": "Travaux de terrassement courants et travaux préparatoires",
-    "43.21A": "Travaux d'installation électrique dans tous locaux",
-    "43.22A": "Travaux d'installation d'eau et de gaz en tous locaux",
-    "43.22B": "Travaux d'installation d'équipements thermiques et de climatisation",
-    "43.29A": "Travaux d'isolation",
-    "43.31Z": "Travaux de plâtrerie",
-    "43.32A": "Travaux de menuiserie bois et PVC",
-    "43.32B": "Travaux de menuiserie métallique et serrurerie",
-    "43.33Z": "Travaux de revêtement des sols et des murs",
-    "43.34Z": "Travaux de peinture et vitrerie",
-    "43.39Z": "Autres travaux de finition",
-    "43.91A": "Travaux de charpente",
-    "43.91B": "Travaux de couverture par éléments",
-    "43.99C": "Travaux de maçonnerie générale et gros œuvre de bâtiment",
+# Chargement de l'ensemble des codes NAF rév. 2 depuis le fichier JSON local
+@st.cache_data
+def charger_libelles_naf(chemin_fichier="codes_naf_rev2.json"):
+    if os.path.exists(chemin_fichier):
+        with open(chemin_fichier, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
 
-    # Commerce, Auto & Réparation
-    "45.11Z": "Commerce de voitures et de véhicules automobiles légers",
-    "45.20A": "Entretien et réparation de véhicules automobiles légers",
-    "45.20B": "Entretien et réparation d'autres véhicules automobiles",
-    "46.90Z": "Commerce de gros (commerce interentreprises) non spécialisé",
-    "47.11B": "Commerce d'alimentation générale",
-    "47.11C": "Supérettes",
-    "47.11D": "Supermarchés",
-    "47.19B": "Autres commerces de détail en magasin non spécialisé",
-    "47.25Z": "Commerce de détail de boissons en magasin spécialisé",
-    "47.52A": "Commerce de détail de quincaillerie, peintures et verres en petites surfaces",
-    "47.71Z": "Commerce de détail d'habillement en magasin spécialisé",
-    "47.73Z": "Commerce de détail de produits pharmaceutiques en magasin spécialisé",
-    "47.78C": "Autres commerces de détail spécialisés divers",
-    "47.91A": "Vente à distance sur catalogue général",
-    "47.91B": "Vente à distance sur catalogue spécialisé",
 
-    # Transports & Logistique
-    "49.32Z": "Transports de voyageurs par taxis",
-    "49.41A": "Transports routiers de fret interurbains",
-    "49.41B": "Transports routiers de fret de proximité",
-    "52.10B": "Entreposage et stockage non frigorifique",
-    "52.29B": "Affrètement et organisation des transports",
+LIBELLES_NAF = charger_libelles_naf()
 
-    # Hébergement & Restauration
-    "55.10Z": "Hôtels et hébergement similaire",
-    "56.10A": "Restauration traditionnelle",
-    "56.10C": "Restauration de type rapide",
-    "56.21Z": "Services des traiteurs",
-    "56.29B": "Autres services de restauration n.c.a.",
-    "56.30Z": "Débits de boissons",
 
-    # Conseil, Numérique, Ingénierie & Services aux entreprises
-    "62.01Z": "Programmation informatique",
-    "62.02A": "Conseil en systèmes et logiciels informatiques",
-    "63.11Z": "Traitement de données, hébergement et activités connexes",
-    "64.20Z": "Activités des sociétés holding",
-    "68.10Z": "Activités des marchands de biens immobiliers",
-    "68.20B": "Location de terrains et d'autres biens immobiliers",
-    "68.31Z": "Agences immobilières",
-    "69.10Z": "Activités juridiques",
-    "69.20Z": "Activités comptables",
-    "70.10Z": "Activités des sièges sociaux",
-    "70.22Z": "Conseil pour les affaires et autres conseils de gestion",
-    "71.11Z": "Activités d'architecture",
-    "71.12B": "Ingénierie, études techniques",
-    "73.11Z": "Agences de publicité",
-    "74.10Z": "Activités spécialisées de design",
-    "74.90B": "Activités spécialisées, scientifiques et techniques diverses",
-    "78.20Z": "Activités des agences de travail temporaire",
-    "81.21Z": "Nettoyage courant des bâtiments",
-    "82.99Z": "Autres activités de soutien aux entreprises n.c.a.",
-
-    # Public, Associations & Santé
-    "84.11Z": "Administration publique générale",
-    "86.10Z": "Activités hospitalières",
-    "86.21Z": "Activités des médecins généralistes",
-    "86.22C": "Autres activités des médecins spécialistes",
-    "86.23Z": "Pratique dentaire",
-    "86.90D": "Activités des infirmiers et des sages-femmes",
-    "86.90E": "Activités des professionnels de la rééducation, de l'appareillage et des pédicures-podologues",
-    "88.99B": "Action sociale sans hébergement n.c.a.",
-    "90.03A": "Création artistique relevant des arts plastiques",
-    "93.12Z": "Activités de clubs de sports",
-    "94.99Z": "Autres organisations fonctionnant par adhésion volontaire",
-    "96.02A": "Coiffure",
-    "96.02B": "Soins de beauté",
-    "96.09Z": "Autres services personnels n.c.a.",
-}
+def normaliser_code_ape(code_brut):
+    code = (code_brut or "").strip().upper()
+    if len(code) == 5 and "." not in code:
+        return f"{code[:2]}.{code[2:]}"
+    return code
 
 
 # --- AUTHENTIFICATION GOOGLE SERVICES (OPTIONNELLE) ---
@@ -220,6 +141,9 @@ def nettoyer_nom_fichier(nom_brut, code_postal):
 # --- INTERFACE UTILISATEUR ---
 st.title("⚡ Extracteur de Prospection Automatique")
 st.markdown("Saisissez une ville ou un code postal pour extraire les entreprises actives triées par effectif.")
+
+if not LIBELLES_NAF:
+    st.warning("⚠️ Fichier `codes_naf_rev2.json` introuvable à côté du script : seuls les libellés renvoyés par l'API seront affichés.")
 
 with st.form("form_extraction"):
     col1, col2 = st.columns(2)
@@ -327,7 +251,10 @@ if bouton_lancer:
                         raison_sociale = ent.get("nom_raison_sociale") or ent.get("nom_complet") or ""
                         enseignes = siege.get("liste_enseignes") or []
                         enseigne_str = ", ".join(enseignes) if isinstance(enseignes, list) else str(enseignes)
-                        code_ape = (ent.get("activite_principale") or siege.get("activite_principale") or "").strip()
+
+                        code_ape = normaliser_code_ape(
+                            ent.get("activite_principale") or siege.get("activite_principale")
+                        )
                         libelle_activite = (
                             ent.get("libelle_activite_principale")
                             or siege.get("libelle_activite_principale")
@@ -345,79 +272,4 @@ if bouton_lancer:
                             "Code APE": code_ape,
                             "Activité": libelle_activite,
                             "Adresse": siege.get("adresse"),
-                            "Code Postal": siege.get("code_postal"),
-                            "Ville": libelle_commune,
-                            "Date de création": ent.get("date_creation"),
-                            "Catégorie": ent.get("categorie_entreprise") or "EI / Non classé",
-                            "Tranche Effectif": EFFECTIFS_LIBELLES.get(code_eff, "Inconnu"),
-                            "Score Tri": score_tri,
-                            "Année Bilan": annee_bilan,
-                            "Chiffre d'Affaires (€)": ca,
-                            "Résultat Net (€)": resultat_net,
-                            "Statut": "Actif",
-                            "Forme Juridique": forme_juridique
-                        })
-
-                    placeholder_progression.text(f"Extraction en cours... Page {page}/{total_pages} ({len(resultats_finaux)} entreprises trouvées)")
-
-                    if page >= total_pages:
-                        break
-                    page += 1
-                    time.sleep(0.35)
-
-                placeholder_progression.empty()
-
-                df = pd.DataFrame(resultats_finaux)
-                if not df.empty:
-                    if ville_prioritaire:
-                        nom_cible_lower = ville_prioritaire.strip().lower()
-                        df["Priorité Ville"] = df["Ville"].apply(lambda x: 1 if str(x).strip().lower() == nom_cible_lower else 2)
-                        df = df.sort_values(by=["Priorité Ville", "Score Tri", "Raison Sociale"], ascending=[True, False, True])
-                        df = df.drop(columns=["Priorité Ville", "Score Tri"])
-                    else:
-                        df = df.sort_values(by=["Score Tri", "Raison Sociale"], ascending=[False, True])
-                        df = df.drop(columns=["Score Tri"])
-
-                    buffer = io.BytesIO()
-                    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-                        df.to_excel(writer, index=False, sheet_name="Entreprises")
-
-                    st.success(f"✅ {len(df)} entreprises actives trouvées !")
-
-                    st.download_button(
-                        label=f"📥 Télécharger {nom_base_fichier}.xlsx",
-                        data=buffer.getvalue(),
-                        file_name=f"{nom_base_fichier}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
-
-                    if sauvegarder_drive:
-                        gc, drive_service = initialiser_connexion_google()
-                        if gc and drive_service:
-                            with st.spinner("💾 Enregistrement dans Google Drive..."):
-                                id_dossier_cible = obtenir_ou_creer_dossier(drive_service, dossier_nom)
-                                nom_sheet = nom_base_fichier
-
-                                requete_fichier = f"name = '{nom_sheet}' and '{id_dossier_cible}' in parents and mimeType = 'application/vnd.google-apps.spreadsheet' and trashed = false"
-                                resultat_fichiers = drive_service.files().list(q=requete_fichier, fields="files(id)").execute()
-                                fichiers_existants = resultat_fichiers.get("files", [])
-
-                                if fichiers_existants:
-                                    id_fichier = fichiers_existants[0]["id"]
-                                    sh = gc.open_by_key(id_fichier)
-                                else:
-                                    sh = gc.create(nom_sheet)
-                                    id_fichier = sh.id
-                                    fichier = drive_service.files().get(fileId=id_fichier, fields="parents").execute()
-                                    parents_precedents = ",".join(fichier.get("parents", []))
-                                    drive_service.files().update(
-                                        fileId=id_fichier,
-                                        addParents=id_dossier_cible,
-                                        removeParents=parents_precedents,
-                                        fields="id, parents"
-                                    ).execute()
-
-                                df_drive = df.fillna("")
-                                worksheet = sh.get_worksheet(0)
-                                worksheet.clear()
-                                worksheet.update([df_drive.columns.values.tolist()] + df_drive.values.tolist())
+                            "Code Postal": siege.get("code
