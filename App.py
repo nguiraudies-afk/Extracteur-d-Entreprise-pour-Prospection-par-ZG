@@ -3,6 +3,7 @@ import json
 import os
 import re
 import time
+import unicodedata
 from typing import Any, Optional
 
 import gspread
@@ -61,6 +62,57 @@ def charger_dictionnaire_json(nom_fichier: str, repli: Optional[dict[str, str]] 
             if isinstance(data, dict):
                 return {str(k).strip().upper(): str(v).strip() for k, v in data.items()}
     return dict(repli) if repli else {}
+
+
+def normaliser_texte_commune(texte: Optional[str]) -> str:
+    if not texte:
+        return ""
+    s = unicodedata.normalize("NFKD", str(texte)).encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"[^a-zA-Z0-9]+", " ", s).strip().upper()
+
+
+@st.cache_data
+def charger_calendrier_cuivre(nom_fichier: str = "calendrier_cuivre_orange.json") -> dict[str, Any]:
+    dossier_script = os.path.dirname(os.path.abspath(__file__))
+    chemin_fichier = os.path.join(dossier_script, nom_fichier)
+    if os.path.exists(chemin_fichier):
+        with open(chemin_fichier, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, dict):
+                return data
+    return {"communes": {}, "par_cp": {}, "par_commune": {}}
+
+
+def trouver_info_cuivre(
+    calendrier: dict[str, Any],
+    code_insee: Optional[str],
+    nom_commune: Optional[str],
+    code_postal: Optional[str],
+) -> tuple[str, str]:
+    """Retourne (date_fermeture_cuivre, lot_cuivre)."""
+    communes = calendrier.get("communes") or {}
+    par_cp = calendrier.get("par_cp") or {}
+    par_commune = calendrier.get("par_commune") or {}
+
+    insee_clean = str(code_insee or "").strip()
+    if insee_clean in communes:
+        _, _, date_fin, lot = communes[insee_clean]
+        return date_fin or "Non renseignée", lot or ""
+
+    cle_commune = normaliser_texte_commune(nom_commune)
+    if cle_commune in par_commune and par_commune[cle_commune]:
+        insee_match = par_commune[cle_commune][0]
+        if insee_match in communes:
+            _, _, date_fin, lot = communes[insee_match]
+            return date_fin or "Non renseignée", lot or ""
+
+    cp_clean = str(code_postal or "").strip()
+    if cp_clean in par_cp and par_cp[cp_clean]:
+        dates = sorted({communes[i][2] for i in par_cp[cp_clean] if i in communes and communes[i][2]})
+        lots = sorted({communes[i][3] for i in par_cp[cp_clean] if i in communes and communes[i][3]})
+        return " / ".join(dates) if dates else "Non renseignée", " / ".join(lots)
+
+    return "Non renseignée", ""
 
 
 def normaliser_code_ape(code_brut: Optional[str]) -> str:
@@ -229,6 +281,7 @@ def formater_entreprise(
     code_postal_cible: str,
     libelles_naf: dict[str, str],
     formes_juridiques: dict[str, str],
+    calendrier_cuivre: dict[str, Any],
     exclure_procedures: bool,
 ) -> Optional[dict[str, Any]]:
     etat_ent = str(ent.get("etat_administratif") or "A").strip().upper()
@@ -276,6 +329,14 @@ def formater_entreprise(
     code_nj = str(ent.get("nature_juridique") or "").strip().upper()
     forme_juridique = formes_juridiques.get(code_nj, f"Code {code_nj}" if code_nj else "Non renseignée")
 
+    code_insee = siege.get("code_commune") or ent.get("code_commune")
+    date_fin_cuivre, lot_cuivre = trouver_info_cuivre(
+        calendrier=calendrier_cuivre,
+        code_insee=code_insee,
+        nom_commune=siege.get("libelle_commune", ""),
+        code_postal=siege.get("code_postal"),
+    )
+
     return {
         "SIREN": ent.get("siren"),
         "Raison Sociale": raison_sociale,
@@ -285,6 +346,8 @@ def formater_entreprise(
         "Adresse": siege.get("adresse"),
         "Code Postal": siege.get("code_postal"),
         "Ville": siege.get("libelle_commune", ""),
+        "Fin Réseau Cuivre": date_fin_cuivre,
+        "Lot Cuivre": lot_cuivre,
         "Date de création": ent.get("date_creation"),
         "Catégorie": ent.get("categorie_entreprise") or "EI / Non classé",
         "Tranche Effectif": EFFECTIFS_LIBELLES.get(code_eff, "Inconnu"),
@@ -318,6 +381,7 @@ def trier_et_preparer_dataframe(lignes: list[dict[str, Any]], ville_prioritaire:
 # --- INTERFACE UTILISATEUR ---
 libelles_naf = charger_dictionnaire_json("codes_naf_rev2.json")
 formes_juridiques = charger_dictionnaire_json("formes_juridiques.json", FORMES_JURIDIQUES_DE_BASE)
+calendrier_cuivre = charger_calendrier_cuivre("calendrier_cuivre_orange.json")
 
 st.title("⚡ Extracteur de Prospection Automatique")
 st.markdown("Saisissez une ville ou un code postal pour extraire les entreprises actives triées par effectif.")
@@ -326,6 +390,8 @@ if not libelles_naf:
     st.warning("⚠️ Fichier `codes_naf_rev2.json` introuvable à côté de `App.py`.")
 if len(formes_juridiques) <= len(FORMES_JURIDIQUES_DE_BASE):
     st.info("ℹ️ Fichier `formes_juridiques.json` non détecté : un dictionnaire de base est utilisé.")
+if not calendrier_cuivre.get("communes"):
+    st.warning("⚠️ Fichier `calendrier_cuivre_orange.json` introuvable ou vide à côté de `App.py`.")
 
 with st.form("form_extraction"):
     col1, col2 = st.columns(2)
@@ -400,6 +466,7 @@ if bouton_lancer:
                             code_postal_cible=code_postal_final,
                             libelles_naf=libelles_naf,
                             formes_juridiques=formes_juridiques,
+                            calendrier_cuivre=calendrier_cuivre,
                             exclure_procedures=exclure_procedures,
                         )
                         if ligne:
