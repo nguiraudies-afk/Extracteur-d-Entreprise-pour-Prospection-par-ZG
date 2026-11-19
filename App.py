@@ -256,7 +256,12 @@ if bouton_lancer:
         else:
             nom_base_fichier = nettoyer_nom_fichier(nom_fichier_perso, code_postal_final)
             cible_texte = f" ({ville_prioritaire})" if ville_prioritaire else ""
-            st.info(f"📍 Cible : Code Postal {code_postal_final}{cible_texte} | 📄 Fichier : `{nom_base_fichier}.xlsx`")
+            st.info(f"🎯 **{len(df_filtre)}** entreprise(s) sélectionnée(s) pour l'export.")
+    try:
+        st.dataframe(df_filtre.astype(str), use_container_width=True)
+    except Exception as e:
+        st.warning(f"Aperçu simplifié du tableau ({e})")
+        st.write(df_filtre.head(20))
 
             with st.spinner("⏳ Extraction en cours depuis l'API nationale des entreprises..."):
                 url = "https://recherche-entreprises.api.gouv.fr/search"
