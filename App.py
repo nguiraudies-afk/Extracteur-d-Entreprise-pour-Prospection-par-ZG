@@ -77,6 +77,7 @@ LIBELLES_NAF = {
     "84.11Z": "Administration publique générale",
 }
 
+
 # --- AUTHENTIFICATION GOOGLE SERVICES (OPTIONNELLE) ---
 def initialiser_connexion_google():
     scopes = [
@@ -87,13 +88,14 @@ def initialiser_connexion_google():
         if "gcp_service_account" in st.secrets:
             info = json.loads(st.secrets["gcp_service_account"])
             creds = Credentials.from_service_account_info(info, scopes=scopes)
-            return gspread.authorize(creds), build('drive', 'v3', credentials=creds)
+            return gspread.authorize(creds), build("drive", "v3", credentials=creds)
         elif os.path.exists("credentials.json"):
             creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
-            return gspread.authorize(creds), build('drive', 'v3', credentials=creds)
+            return gspread.authorize(creds), build("drive", "v3", credentials=creds)
     except Exception:
         pass
     return None, None
+
 
 def obtenir_code_postal_par_ville(nom_ville):
     url_geo = "https://geo.api.gouv.fr/communes"
@@ -103,21 +105,22 @@ def obtenir_code_postal_par_ville(nom_ville):
         if response.status_code == 200:
             resultats = response.json()
             if resultats and "codesPostaux" in resultats[0]:
-                return resultats[0]["codesPostaux"][0], resultats[0]['nom']
+                return resultats[0]["codesPostaux"][0], resultats[0]["nom"]
     except Exception as e:
         st.error(f"Erreur recherche ville : {e}")
     return None, None
 
+
 def obtenir_ou_creer_dossier(drive_service, nom_dossier):
     requete = f"name = '{nom_dossier}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
-    resultats = drive_service.files().list(q=requete, spaces='drive', fields='files(id, name)').execute()
-    fichiers = resultats.get('files', [])
+    resultats = drive_service.files().list(q=requete, spaces="drive", fields="files(id, name)").execute()
+    fichiers = resultats.get("files", [])
     if fichiers:
-        return fichiers[0]['id']
-    else:
-        metadonnees = {'name': nom_dossier, 'mimeType': 'application/vnd.google-apps.folder'}
-        dossier = drive_service.files().create(body=metadonnees, fields='id').execute()
-        return dossier.get('id')
+        return fichiers[0]["id"]
+    metadonnees = {"name": nom_dossier, "mimeType": "application/vnd.google-apps.folder"}
+    dossier = drive_service.files().create(body=metadonnees, fields="id").execute()
+    return dossier.get("id")
+
 
 def nettoyer_nom_fichier(nom_brut, code_postal):
     nom = nom_brut.strip()
@@ -127,6 +130,7 @@ def nettoyer_nom_fichier(nom_brut, code_postal):
         nom = nom[:-5]
     nom = re.sub(r'[\\/*?:"<>|]', "_", nom)
     return nom
+
 
 # --- INTERFACE UTILISATEUR ---
 st.title("⚡ Extracteur de Prospection Automatique")
@@ -141,11 +145,11 @@ with st.form("form_extraction"):
             "Nom du fichier de sortie (sans .xlsx)",
             placeholder="Ex: Prospection_Tours_2026 (laisser vide pour auto)"
         )
-    
+
     with st.expander("⚙️ Options Google Drive (Facultatif)"):
         sauvegarder_drive = st.checkbox("Enregistrer aussi dans Google Drive (nécessite une clé Google Cloud)", value=False)
         nom_dossier_drive = st.text_input("Nom du dossier Google Drive", value="Liste Prospection")
-        
+
     bouton_lancer = st.form_submit_button("🚀 Lancer l'extraction")
 
 if bouton_lancer:
@@ -166,7 +170,8 @@ if bouton_lancer:
             st.error(f"❌ Impossible de trouver un code postal pour '{saisie}'.")
         else:
             nom_base_fichier = nettoyer_nom_fichier(nom_fichier_perso, code_postal_final)
-            st.info(f"📍 Cible : Code Postal {code_postal_final}" + (f" ({ville_prioritaire})" if ville_prioritaire else "") + f" | 📄 Fichier : `{nom_base_fichier}.xlsx`")
+            cible_texte = f" ({ville_prioritaire})" if ville_prioritaire else ""
+            st.info(f"📍 Cible : Code Postal {code_postal_final}{cible_texte} | 📄 Fichier : `{nom_base_fichier}.xlsx`")
 
             with st.spinner("⏳ Extraction en cours depuis l'API nationale des entreprises..."):
                 url = "https://recherche-entreprises.api.gouv.fr/search"
@@ -176,8 +181,13 @@ if bouton_lancer:
                 placeholder_progression = st.empty()
 
                 while True:
-                    params = {"code_postal": code_postal_final, "etat_administratif": "A", "page": page, "per_page": per_page}
-                    
+                    params = {
+                        "code_postal": code_postal_final,
+                        "etat_administratif": "A",
+                        "page": page,
+                        "per_page": per_page
+                    }
+
                     # --- BLOC SÉCURISÉ (GESTION ERREUR 429 ET COUPURES RÉSEAU) ---
                     response = None
                     for tentative in range(4):
@@ -287,7 +297,7 @@ if bouton_lancer:
                         df.to_excel(writer, index=False, sheet_name="Entreprises")
 
                     st.success(f"✅ {len(df)} entreprises actives trouvées !")
-                    
+
                     st.download_button(
                         label=f"📥 Télécharger {nom_base_fichier}.xlsx",
                         data=buffer.getvalue(),
@@ -302,4 +312,34 @@ if bouton_lancer:
                                 id_dossier_cible = obtenir_ou_creer_dossier(drive_service, dossier_nom)
                                 nom_sheet = nom_base_fichier
 
-                                requete_fichier = f"
+                                requete_fichier = f"name = '{nom_sheet}' and '{id_dossier_cible}' in parents and mimeType = 'application/vnd.google-apps.spreadsheet' and trashed = false"
+                                resultat_fichiers = drive_service.files().list(q=requete_fichier, fields="files(id)").execute()
+                                fichiers_existants = resultat_fichiers.get("files", [])
+
+                                if fichiers_existants:
+                                    id_fichier = fichiers_existants[0]["id"]
+                                    sh = gc.open_by_key(id_fichier)
+                                else:
+                                    sh = gc.create(nom_sheet)
+                                    id_fichier = sh.id
+                                    fichier = drive_service.files().get(fileId=id_fichier, fields="parents").execute()
+                                    parents_precedents = ",".join(fichier.get("parents", []))
+                                    drive_service.files().update(
+                                        fileId=id_fichier,
+                                        addParents=id_dossier_cible,
+                                        removeParents=parents_precedents,
+                                        fields="id, parents"
+                                    ).execute()
+
+                                df_drive = df.fillna("")
+                                worksheet = sh.get_worksheet(0)
+                                worksheet.clear()
+                                worksheet.update([df_drive.columns.values.tolist()] + df_drive.values.tolist())
+
+                            st.success(f"☁️ Fichier également sauvegardé dans Google Drive : « {dossier_nom} > {nom_sheet} ».")
+                        else:
+                            st.warning("⚠️ La sauvegarde Google Drive a été ignorée car aucune clé d'accès Google Cloud n'est configurée.")
+
+                    st.dataframe(df, use_container_width=True)
+                else:
+                    st.info("Aucune entreprise active trouvée pour cette recherche.")
