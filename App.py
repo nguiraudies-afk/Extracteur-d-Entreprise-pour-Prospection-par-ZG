@@ -189,9 +189,20 @@ if bouton_lancer:
                         score_tri = int(code_eff) if code_eff.isdigit() else -1
                         libelle_commune = siege.get("libelle_commune", "")
 
+                        # Récupération du nom, de l'enseigne et de l'activité (APE/NAF)
+                        raison_sociale = ent.get("nom_raison_sociale") or ent.get("nom_complet") or ""
+                        enseignes = siege.get("liste_enseignes") or []
+                        enseigne_str = ", ".join(enseignes) if isinstance(enseignes, list) else str(enseignes)
+                        code_ape = ent.get("activite_principale") or siege.get("activite_principale") or ""
+                        libelle_activite = ent.get("libelle_activite_principale") or siege.get("libelle_activite_principale") or ""
+
                         resultats_finaux.append({
                             "SIREN": ent.get("siren"),
+                            "Raison Sociale": raison_sociale,
                             "Dénomination": ent.get("nom_complet"),
+                            "Enseigne": enseigne_str,
+                            "Code APE": code_ape,
+                            "Activité": libelle_activite,
                             "Adresse": siege.get("adresse"),
                             "Code Postal": siege.get("code_postal"),
                             "Ville": libelle_commune,
